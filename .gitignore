@@ -1,2 +1,4 @@
 build/*
 *.html
+!2draw/*.html
+dist-2draw/

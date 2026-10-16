@@ -1413,7 +1413,7 @@ var TegakiUI = {
   },
   
   updateZoomLevel: function() {
-    $T.id('tegaki-zoom-lbl').textContent = (Tegaki.zoomFactor * 100) + '%';
+    $T.id('tegaki-zoom-lbl').textContent = Math.round(Tegaki.zoomFactor * 100) + '%';
     
     if (Tegaki.zoomLevel + Tegaki.zoomBaseLevel >= Tegaki.zoomFactorList.length) {
       $T.id('tegaki-zoomin-btn').classList.add('tegaki-disabled');

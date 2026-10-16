@@ -31,8 +31,9 @@ var Tegaki = {
   
   zoomLevel: 0,
   zoomFactor: 1.0,
-  zoomFactorList: [0.5, 1.0, 2.0, 4.0, 8.0, 16.0],
-  zoomBaseLevel: 1,
+  // [2draw] finer steps below 100%, so a drawing fits a phone screen.
+  zoomFactorList: [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 8.0, 16.0],
+  zoomBaseLevel: 5,
   
   hasCustomCanvas: false,
   
@@ -106,6 +107,19 @@ var Tegaki = {
     
     self.createTools();
     
+    // [2draw] Continue an earlier recording (opts.continueReplay, the bytes
+    // of a .tgkr): start from its initial state, replay all of it below, and
+    // keep recording onto the end of it.
+    var continued = null;
+    
+    if (!self.replayMode && opts.continueReplay) {
+      continued = new TegakiReplayViewer();
+      continued.loadFromBuffer(opts.continueReplay);
+      self.replayViewer = continued;
+      self.initFromReplay();
+      self.replayViewer = null;
+    }
+    
     self.initKeybinds();
     
     [self.bg, self.canvasCnt, self.layersCnt] = TegakiUI.buildUI();
@@ -118,8 +132,17 @@ var Tegaki = {
       
       self.setTool(self.defaultTool);
       
+      if (continued) {
+        self.replayEvents(continued.events);
+      }
+      
       if (self.saveReplay) {
         self.replayRecorder = new TegakiReplayRecorder();
+        
+        if (continued) {
+          self.replayRecorder.continueFrom(continued);
+        }
+        
         self.replayRecorder.start();
       }
     }
@@ -203,6 +226,22 @@ var Tegaki = {
           tool[prop] = !!rTool[prop];
         }
       }
+    }
+  },
+  
+  // [2draw] Applies recorded events at once (nothing is recorded meanwhile).
+  replayEvents: function(events) {
+    var e, recorder = Tegaki.replayRecorder;
+    
+    Tegaki.replayRecorder = null;
+    
+    try {
+      for (e of events) {
+        e.dispatch();
+      }
+    }
+    finally {
+      Tegaki.replayRecorder = recorder;
     }
   },
   

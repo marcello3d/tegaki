@@ -23,6 +23,10 @@ class TegakiReplayRecorder {
     
     this.events = [];
     
+    // [2draw] Added to every timestamp: continueFrom() sets it so that this
+    // session's events follow the earlier recording's.
+    this.timeOffset = 0;
+    
     this.mimeType = 'application/octet-stream';
   }
   
@@ -62,7 +66,7 @@ class TegakiReplayRecorder {
     }
     
     if (this.startTimeStamp === 0) {
-      this.events.push(new TegakiEventPrelude(performance.now()));
+      this.events.push(new TegakiEventPrelude(performance.now() + this.timeOffset));
       this.startTimeStamp = Date.now();
     }
     
@@ -74,13 +78,15 @@ class TegakiReplayRecorder {
       return;
     }
     
-    this.events.push(new TegakiEventConclusion(performance.now()));
+    this.events.push(new TegakiEventConclusion(performance.now() + this.timeOffset));
     this.endTimeStamp = Date.now();
     this.recording = false;
   }
   
   push(e) {
     if (this.recording) {
+      e.timeStamp += this.timeOffset;
+      
       if (e.coalesce && this.events[this.events.length - 1].type === e.type) {
         this.events[this.events.length - 1] = e;
       }
@@ -88,6 +94,33 @@ class TegakiReplayRecorder {
         this.events.push(e);
       }
     }
+  }
+  
+  // [2draw] Continues the recording `viewer` (a loaded TegakiReplayViewer):
+  // its header (initial canvas and tool state) and its events, without the
+  // conclusion, followed by this session's after a one second pause.
+  continueFrom(viewer) {
+    var id, events, last;
+    
+    this.canvasWidth = viewer.canvasWidth;
+    this.canvasHeight = viewer.canvasHeight;
+    this.bgColor = viewer.bgColor.slice();
+    this.toolColor = viewer.toolColor.slice();
+    this.toolId = viewer.toolId;
+    
+    this.toolList = [];
+    
+    for (id in viewer.toolMap) {
+      this.toolList.push(viewer.toolMap[id]);
+    }
+    
+    events = viewer.events.slice(0, -1);
+    last = events[events.length - 1].timeStamp;
+    
+    this.events = events;
+    this.startTimeStamp = viewer.startTimeStamp || Date.now();
+    this.endTimeStamp = 0;
+    this.timeOffset = last + 1000 - performance.now();
   }
   
   getEventStackSize() {

@@ -1,0 +1,145 @@
+/* tegaki.js on 2draw.net: the editor fills its iframe, and on phones the
+   right-hand panel becomes a drawer (tegaki-2draw.js installPanelToggle). */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #a3b1bf;
+  -webkit-text-size-adjust: 100%;
+}
+
+#tegaki-menu-cnt {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+#tegaki-menu-cnt::-webkit-scrollbar {
+  display: none;
+}
+
+#tegaki-2draw-notice {
+  position: fixed;
+  left: 50%;
+  top: 40%;
+  transform: translate(-50%, -50%);
+  z-index: 10000;
+  padding: 12px 18px;
+  background: #fff;
+  color: #222;
+  font: 15px/1.4 arial, sans-serif;
+  border-radius: 6px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+}
+
+#tegaki-2draw-notice[hidden] {
+  display: none;
+}
+
+.tegaki-2draw-panel-btn {
+  display: none !important;
+}
+
+#tegaki-finish-btn {
+  background: #3d6e9e;
+  color: #fff;
+  border-radius: 3px;
+}
+
+#tegaki-finish-btn:hover {
+  background: #33608c !important;
+}
+
+/* Phones (and small tablets held upright): bigger touch targets, no fixed
+   right-hand column. */
+@media (max-width: 720px) {
+  #tegaki {
+    grid-template-columns: 44px 1fr;
+    grid-template-rows: 40px 1fr 20px;
+  }
+
+  #tegaki-menu-cnt {
+    grid-area: 1 / 1 / 2 / 3;
+  }
+
+  #tegaki-menu-bar {
+    font-size: 15px;
+    padding-right: 6px;
+  }
+
+  #tegaki .tegaki-mb-btn {
+    line-height: 40px;
+    height: 40px;
+    padding: 0 9px;
+  }
+
+  #tegaki-finish-btn {
+    margin: 5px 2px;
+    line-height: 30px !important;
+    height: 30px !important;
+  }
+
+  #tegaki-toolmode-bar {
+    line-height: 40px;
+    font-size: 13px;
+  }
+
+  #tegaki-toolmode-bar .tegaki-sw-btn {
+    padding: 6px 8px;
+  }
+
+  #tegaki-tools-cnt {
+    grid-area: 2 / 1 / 4 / 2;
+    overflow-y: auto;
+    padding: 4px 2px;
+  }
+
+  #tegaki-tools-grid > * {
+    min-height: 36px;
+  }
+
+  #tegaki-canvas-cnt {
+    grid-area: 2 / 2 / 3 / 3;
+  }
+
+  #tegaki-status-cnt {
+    grid-area: 3 / 2 / 4 / 3;
+    overflow: hidden;
+  }
+
+  #tegaki-layers-wrap {
+    padding: 8px;
+  }
+
+  #tegaki-ctrl-cnt {
+    display: none;
+    position: fixed;
+    z-index: 3;
+    top: 42px;
+    right: 0;
+    bottom: 0;
+    width: min(240px, 78vw);
+    box-sizing: border-box;
+    padding: 8px;
+    box-shadow: -4px 0 16px rgba(0, 0, 0, 0.3);
+  }
+
+  .tegaki-2draw-panel-open #tegaki-ctrl-cnt {
+    display: block;
+  }
+
+  .tegaki-2draw-panel-btn {
+    display: inline-block !important;
+  }
+
+  .tegaki-2draw-panel-btn.tegaki-2draw-on {
+    background-color: rgba(0, 0, 0, 0.15);
+  }
+
+  .tegaki-ctrlgrp .tegaki-ui-btn,
+  #tegaki-layers-ctrl > * {
+    min-width: 28px;
+    min-height: 28px;
+  }
+}
