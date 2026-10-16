@@ -66,6 +66,9 @@
   }
 
   function openEditor(p, continueReplay, record) {
+    // Inside 2draw the draw page warns before leaving unsaved work; a second
+    // warning from this frame would only stack another prompt on it.
+    if (host()) Tegaki.onTabClose = function () {};
     Tegaki.open({
       width: p.width,
       height: p.height,
