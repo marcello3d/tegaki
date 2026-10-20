@@ -146,18 +146,29 @@
   }
 
   /**
-   * Touch: one finger draws, two fingers pan and pinch-zoom. A touch that
-   * lands on the canvas is held back for a moment (or until it moves) before
-   * it is handed to Tegaki, so that a second finger arriving meanwhile turns
-   * it into a gesture instead of a dot on the drawing. Pens and mice are not
-   * affected.
+   * Touch: one finger draws; two fingers pan and pinch-zoom, and never draw.
+   *
+   * A touch that lands on the canvas is held back for a moment (or until it
+   * moves) before it is handed to Tegaki, so that a second finger arriving
+   * meanwhile makes a gesture without even a flash of ink, and a fill or a
+   * colour pick never fires. A second finger after that ends the first
+   * finger's stroke: it is kept if it began at least KEEP_MS ago (it was
+   * meant), and otherwise dropped without a trace: its pixels come back off
+   * the layer, it is no undo or redo step, and its events leave the .tgkr
+   * recording. The gesture lasts until every finger is up, so a finger left
+   * down does not draw. Pens and mice are not affected, and a touch during a
+   * pen or mouse stroke is ignored (a palm).
    */
   function installTouchGestures() {
     var cursor = TegakiCursor.getCanvas();
     var cnt = Tegaki.canvasCnt;
-    var HOLD_MS = 90, SLOP = 8;
+    var HOLD_MS = 90, SLOP = 8, KEEP_MS = 500;
     var touches = new Map();
+    /** The first touch, held back: { down, moves, timer }. */
     var pending = null;
+    /** The touch stroke Tegaki is drawing: { id, t0, events, pressure }. */
+    var stroke = null;
+    /** Pan and pinch, from the second finger until every finger is up. */
     var gesture = null;
 
     function stop(e) {
@@ -169,8 +180,53 @@
       var p = pending;
       pending = null;
       clearTimeout(p.timer);
+      var rec = Tegaki.replayRecorder;
+      // where the stroke starts, to take it back if a second finger follows
+      var mark = {
+        id: p.down.pointerId,
+        t0: p.down.timeStamp,
+        events: rec ? rec.events.length : 0,
+        pressure: [TegakiPressure.pressureNow, TegakiPressure.pressureThen],
+      };
       Tegaki.onPointerDown(p.down);
+      stroke = Tegaki.isPainting ? mark : null;
       for (var i = 0; i < p.moves.length; i++) Tegaki.onPointerMove(p.moves[i]);
+    }
+    function isDrawEvent(ev) {
+      return ev instanceof TegakiEventDrawStart || ev instanceof TegakiEventDrawStartNoP
+        || ev instanceof TegakiEventDraw || ev instanceof TegakiEventDrawNoP;
+    }
+    /** A second finger landed while a touch stroke was being drawn. */
+    function endStroke(e) {
+      var s = stroke;
+      stroke = null;
+      if (e.timeStamp - s.t0 >= KEEP_MS) {
+        // as if the finger had lifted
+        Tegaki.onPointerUp({ pointerId: s.id, timeStamp: e.timeStamp });
+        return;
+      }
+      var action = TegakiHistory.pendingAction;
+      Tegaki.isPainting = false;
+      TegakiHistory.pendingAction = null;
+      if (action && action.imageDataBefore) {
+        var layer = TegakiLayers.getLayerById(action.layerId);
+        if (layer) {
+          layer.ctx.putImageData(action.imageDataBefore, 0, 0);
+          TegakiLayers.syncLayerImageData(layer, action.imageDataBefore);
+          TegakiUI.updateLayerPreview(layer);
+        }
+      }
+      Tegaki.clearBuffers();
+      TegakiPressure.pressureNow = s.pressure[0];
+      TegakiPressure.pressureThen = s.pressure[1];
+      var rec = Tegaki.replayRecorder;
+      if (rec && rec.events.length > s.events) {
+        // The stroke's drawing events go; anything else it did stays (the
+        // colour a pick chose), so the recording still matches the editor.
+        var rest = rec.events.slice(s.events).filter(function (ev) { return !isDrawEvent(ev); });
+        rec.events.length = s.events;
+        for (var i = 0; i < rest.length; i++) rec.events.push(rest[i]);
+      }
     }
     function mid() {
       var xs = 0, ys = 0, pts = Array.from(touches.values()).slice(0, 2);
@@ -208,18 +264,26 @@
     window.addEventListener("pointerdown", function (e) {
       if (e.pointerType !== "touch" || e.target !== cursor) return;
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (touches.size === 1 && !Tegaki.isPainting) {
-        stop(e);
-        pending = { down: e, moves: [], timer: setTimeout(commitPending, HOLD_MS) };
-      } else if (touches.size === 2 && pending) {
-        stop(e);
+      // Tegaki sees a touch go down only through commitPending.
+      stop(e);
+      if (gesture) {
+        if (touches.size >= 2) startGesture(); // other fingers now: re-anchor
+        return;
+      }
+      if (touches.size === 1) {
+        // during a pen or mouse stroke, a touch is a palm
+        if (!Tegaki.isPainting) pending = { down: e, moves: [], timer: setTimeout(commitPending, HOLD_MS) };
+        return;
+      }
+      if (pending) {
         clearTimeout(pending.timer);
         pending = null;
-        startGesture();
-      } else {
-        // a second finger after the stroke began, or a third: ignored
-        stop(e);
+      } else if (stroke && Tegaki.isPainting && Tegaki.activePointerId === stroke.id) {
+        endStroke(e);
+      } else if (Tegaki.isPainting) {
+        return; // a pen or mouse stroke: palms
       }
+      startGesture();
     }, true);
 
     window.addEventListener("pointermove", function (e) {
@@ -242,8 +306,9 @@
       touches.delete(e.pointerId);
       if (gesture) {
         stop(e);
+        // nothing draws until every finger is up; two still down go on
         if (!touches.size) gesture = null;
-        else if (touches.size === 1) gesture = null;
+        else if (touches.size >= 2) startGesture();
         return;
       }
       if (pending && e.pointerId === pending.down.pointerId) {
@@ -257,6 +322,7 @@
       } else if (Tegaki.isPainting && e.pointerId !== Tegaki.activePointerId) {
         stop(e);
       }
+      if (stroke && e.pointerId === stroke.id) stroke = null;
     }
     window.addEventListener("pointerup", end, true);
     window.addEventListener("pointercancel", end, true);
