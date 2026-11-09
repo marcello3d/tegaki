@@ -760,6 +760,9 @@ var Tegaki = {
   onOpenClick: function() {
     var el, tainted;
     
+    // 2draw: drawings are drawn here; opening an image file is off.
+    return;
+    
     tainted = TegakiHistory.undoStack[0] || TegakiHistory.redoStack[0];
     
     if (tainted || Tegaki.saveReplay) {

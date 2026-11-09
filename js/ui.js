@@ -75,7 +75,7 @@ var TegakiUI = {
     
     bg.appendChild(el);
     
-    bg.appendChild(TegakiUI.buildDummyFilePicker());
+    // 2draw: no file picker (see Tegaki.onOpenClick).
     
     //
     // Tools area
@@ -156,11 +156,7 @@ var TegakiUI = {
     $T.on(btn, 'click', Tegaki.onNewClick);
     frag.appendChild(btn);
     
-    btn = $T.el('span');
-    btn.className = 'tegaki-mb-btn';
-    btn.textContent = TegakiStrings.open;
-    $T.on(btn, 'click', Tegaki.onOpenClick);
-    frag.appendChild(btn);
+    // 2draw: no Open button (no pictures from outside the app).
     
     btn = $T.el('span');
     btn.className = 'tegaki-mb-btn';
