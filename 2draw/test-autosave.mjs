@@ -10,8 +10,10 @@
 // on); a save mid-stroke when the page is hidden; a failing store ("Not
 // saved", retried); one editor per draft (two tabs); sealed chunks on a long
 // drawing; a revision (anim=) continued from the copy; a picture-only
-// revision (load=); a copy that can't be read is set aside; expiry; and
-// submit deletes the copy once the host calls uploaded().
+// revision (load=); a copy that can't be read is set aside; expiry; submit
+// deletes the copy once the host calls uploaded(); and iOS (WebKit's
+// back/forward cache): drawing without a pause still saves, and a page going
+// into that cache starts no transaction until it is shown again.
 //
 // Needs playwright-core: PLAYWRIGHT_CORE=<dir> or 2draw.net's worker/node_modules.
 import fs from "node:fs";
@@ -385,6 +387,55 @@ console.log("a copy that can't be read; expiry");
   }));
   check(!keys2.includes("old11111"), "a copy not saved for 30 days goes");
   check(keys2.includes("aside111~unreadable-1"), "a copy set aside yesterday stays (30 days from being set aside)");
+  await page.close();
+}
+
+// --- 10. iOS: saves while drawing without a pause; nothing in the back/forward cache ---------
+console.log("iOS: drawing without a pause; the back/forward cache");
+{
+  const page = await context.newPage();
+  let f = await open(page, q("jjjj1010"));
+  // strokes back to back for 3 s, never pausing: a save is due 0.7 s after the
+  // first one, and isn't put off
+  const t0 = Date.now();
+  let firstSave = 0;
+  for (let i = 0; Date.now() - t0 < 3000; i++) {
+    const y = 20 + (i * 17) % 160;
+    await stroke(page, f, 20, y, 280, (y + 60) % 190, 6);
+    if (!firstSave && (await f.evaluate(() => window.tegakiSaver.saves)) > 0) firstSave = Date.now() - t0;
+  }
+  check(firstSave > 0 && firstSave < 1800, "drawing without a pause still saves", firstSave);
+  const n = await f.evaluate(() => window.tegakiSaver.saves);
+  check(n >= 2, "and keeps saving while drawing goes on", n);
+  await f.waitForFunction(() => !window.tegakiSaver.saving && !window.tegakiSaver.dirty, null, { timeout: 5000 });
+  // into the back/forward cache (a swipe back): nothing new starts
+  await f.evaluate(() => {
+    window.__tx = 0;
+    const t = IDBDatabase.prototype.transaction;
+    IDBDatabase.prototype.transaction = function (...a) {
+      window.__tx++;
+      return t.apply(this, a);
+    };
+    dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.tegakiSaver.changed();
+  });
+  await sleep(1500);
+  let away = await f.evaluate(() => ({ tx: window.__tx, dirty: window.tegakiSaver.dirty, failed: window.tegakiSaver.failed }));
+  check(away.tx === 0 && away.dirty && !away.failed, "in the back/forward cache no transaction starts, and nothing fails", away);
+  await f.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+  });
+  await waitSaved(f, n + 1);
+  away = await f.evaluate(() => ({ tx: window.__tx, dirty: window.tegakiSaver.dirty }));
+  check(away.tx > 0 && !away.dirty, "shown again, what it held is saved", away);
+  const before = await state(f);
+  f = await open(page, q("jjjj1010"));
+  const after = await state(f);
+  check(after.hash === before.hash && after.undo === before.undo, "reopened, everything is back", [before.undo, after.undo]);
+  await f.evaluate(() => window.tegakiSaver.delete());
   await page.close();
 }
 

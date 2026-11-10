@@ -36,8 +36,12 @@
   var MAX_AGE_MS = 30 * 24 * 3600 * 1000;
   /** Events per sealed chunk. */
   var CHUNK_EVENTS = 2048;
-  /** Save this long after the last change. */
-  var SAVE_DELAY_MS = 1500;
+  /** A save is due this long after the first change since the last save;
+   * later changes don't put it off (see Saver). */
+  var SAVE_DELAY_MS = 700;
+  /** A store that failed is tried again after these waits (a fresh
+   * connection each time) before a save says it failed. */
+  var DB_RETRY_MS = [250, 1000, 3000];
   /** After a failed save, try again this long after (and at every change). */
   var RETRY_MS = 5000;
 
@@ -46,47 +50,184 @@
   }
 
   // --- IndexedDB -------------------------------------------------------------
+  // Every transaction is committed as soon as its last request is made
+  // (commitTx), never left to commit by itself: WebKit (Safari, the iOS app)
+  // puts a page that is left into its back/forward cache right after
+  // pagehide and freezes it there, and a frozen page with a transaction
+  // still open holds the store, so the same drawing opened again waited
+  // behind it until the frozen page was thrown away, minutes later. So, too,
+  // as Lascaux Pocket does (2draw.net worker/src/pocket/ink.ts, "The
+  // device's store"): a page going into that cache (pagehide, persisted)
+  // starts no new transaction until it is shown again (pageAway), aborts any
+  // still making requests (openTx) and closes its connection (opened again
+  // when next needed). A transaction that fails is tried again on a fresh
+  // connection (DB_RETRY_MS) before anyone says "Not saved".
 
   var dbPromise = null;
+  var dbConn = null;
+  var pageAway = null;
+  var pageBack = null;
+  var openTx = new Set();
+  var onPageBack = [];
+
+  function isPageAway() {
+    return !!pageAway;
+  }
+
+  /** A transaction aborted because the page went into the back/forward
+   * cache: not a failure. */
+  function pageAwayError() {
+    var e = new Error("the page went into the back/forward cache");
+    e.name = "PageAwayError";
+    return e;
+  }
+
+  function commitTx(tx) {
+    // (commit(): Safari 15+, Chrome 76+; older ones commit by themselves)
+    if (typeof tx.commit === "function") {
+      try {
+        tx.commit();
+      } catch (e) {} // (already finishing)
+    }
+  }
+
+  function dropDb(db) {
+    try {
+      db.close();
+    } catch (e) {}
+    if (dbConn === db) {
+      dbConn = null;
+      dbPromise = null;
+    }
+  }
+
+  addEventListener("pagehide", function (e) {
+    if (!e.persisted) return;
+    if (!pageAway) pageAway = new Promise(function (r) { pageBack = r; });
+    openTx.forEach(function (tx) {
+      try {
+        tx.abort();
+      } catch (e2) {}
+    });
+    openTx.clear();
+    if (dbConn) dropDb(dbConn);
+  });
+  addEventListener("pageshow", function () {
+    if (!pageAway) return;
+    pageAway = null;
+    if (pageBack) pageBack();
+    pageBack = null;
+    for (var i = 0; i < onPageBack.length; i++) {
+      try {
+        onPageBack[i]();
+      } catch (e) {
+        console.error("[autosave] pageshow handler failed", e);
+      }
+    }
+  });
+
+  function openDbOnce() {
+    return new Promise(function (resolve, reject) {
+      if (typeof indexedDB === "undefined") return reject(new Error("IndexedDB is not available"));
+      var r = indexedDB.open(DB_NAME, 1);
+      r.onupgradeneeded = function () {
+        var db = r.result;
+        if (!db.objectStoreNames.contains(DRAFTS)) db.createObjectStore(DRAFTS, { keyPath: "key" });
+        if (!db.objectStoreNames.contains(PARTS)) db.createObjectStore(PARTS, { keyPath: ["key", "name"] });
+      };
+      r.onsuccess = function () {
+        var db = r.result;
+        // another tab upgrading: let it
+        db.onversionchange = function () { dropDb(db); };
+        db.onclose = function () { dropDb(db); };
+        dbConn = db;
+        resolve(db);
+      };
+      r.onerror = function () { reject(r.error); };
+      r.onblocked = function () { console.warn("[autosave] the device store's open is waiting on another page"); };
+    });
+  }
 
   function openDb() {
     if (!dbPromise) {
-      dbPromise = new Promise(function (resolve, reject) {
-        if (typeof indexedDB === "undefined") return reject(new Error("IndexedDB is not available"));
-        var r = indexedDB.open(DB_NAME, 1);
-        r.onupgradeneeded = function () {
-          var db = r.result;
-          if (!db.objectStoreNames.contains(DRAFTS)) db.createObjectStore(DRAFTS, { keyPath: "key" });
-          if (!db.objectStoreNames.contains(PARTS)) db.createObjectStore(PARTS, { keyPath: ["key", "name"] });
-        };
-        r.onsuccess = function () {
-          var db = r.result;
-          db.onversionchange = function () {
-            db.close();
-            dbPromise = null;
-          };
-          resolve(db);
-        };
-        r.onerror = function () { reject(r.error); };
-        r.onblocked = function () { reject(new Error("IndexedDB open blocked")); };
-      });
+      var attempt = 0;
+      var tryOpen = function () {
+        return openDbOnce().catch(function (err) {
+          if (attempt >= DB_RETRY_MS.length || typeof indexedDB === "undefined") throw err;
+          return sleep(DB_RETRY_MS[attempt++]).then(tryOpen);
+        });
+      };
+      dbPromise = tryOpen();
       dbPromise.catch(function () { dbPromise = null; });
     }
     return dbPromise;
   }
 
-  function req(r) {
-    return new Promise(function (resolve, reject) {
-      r.onsuccess = function () { resolve(r.result); };
-      r.onerror = function () { reject(r.error); };
-    });
+  function retryable(err) {
+    return !(err && ["PageAwayError", "QuotaExceededError", "DataError", "DataCloneError", "ConstraintError", "ReadOnlyError", "VersionError"].indexOf(err.name) >= 0);
+  }
+
+  function waitBack() {
+    return pageAway ? pageAway.then(waitBack) : Promise.resolve();
+  }
+
+  /**
+   * A transaction: fn(tx, finish) makes its requests. Unchained, it makes
+   * them all at once (none from another's callback) and the transaction is
+   * committed straight after; chained, fn calls finish() after its last
+   * request (made from a callback), which commits it, and it is aborted if
+   * the page goes into the back/forward cache first. Never started while the
+   * page is in that cache; tried again (DB_RETRY_MS, a fresh connection) if
+   * it fails. Resolves with what fn returned, its requests' results filled in.
+   */
+  function runTx(stores, mode, fn, chained) {
+    var attempt = 0;
+    function once() {
+      return waitBack().then(openDb).then(function (db) {
+        var tx;
+        try {
+          tx = db.transaction(stores, mode);
+        } catch (e) {
+          // (closed under it: opened again)
+          dropDb(db);
+          throw e;
+        }
+        if (chained) openTx.add(tx);
+        var finished = done(tx);
+        var out;
+        try {
+          out = fn(tx, function () { commitTx(tx); });
+        } catch (e) {
+          try {
+            tx.abort();
+          } catch (e2) {}
+          openTx.delete(tx);
+          return finished.catch(function () {}).then(function () { throw e; });
+        }
+        if (!chained) commitTx(tx);
+        return finished.then(function () {
+          openTx.delete(tx);
+          return out;
+        }, function (e) {
+          openTx.delete(tx);
+          throw e;
+        });
+      });
+    }
+    function go() {
+      return once().catch(function (err) {
+        if (attempt >= DB_RETRY_MS.length || !retryable(err)) throw err;
+        return sleep(DB_RETRY_MS[attempt++]).then(go);
+      });
+    }
+    return go();
   }
 
   function done(tx) {
     return new Promise(function (resolve, reject) {
       tx.oncomplete = function () { resolve(); };
       tx.onerror = function () { reject(tx.error); };
-      tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
+      tx.onabort = function () { reject(pageAway ? pageAwayError() : tx.error || new Error("transaction aborted")); };
     });
   }
 
@@ -100,72 +241,68 @@
 
   /** A draft's record and its parts by name, or null. */
   function loadDraft(key) {
-    return openDb().then(function (db) {
-      var tx = db.transaction([DRAFTS, PARTS], "readonly");
-      return Promise.all([req(tx.objectStore(DRAFTS).get(key)), req(tx.objectStore(PARTS).getAll(partsRange(key)))]);
+    return runTx([DRAFTS, PARTS], "readonly", function (tx) {
+      return { meta: tx.objectStore(DRAFTS).get(key), parts: tx.objectStore(PARTS).getAll(partsRange(key)) };
     }).then(function (got) {
-      var meta = got[0];
+      var meta = got.meta.result;
+      var list = got.parts.result;
       if (!meta) return null;
       if (meta.v !== VERSION) throw new Error("Unsupported device copy version " + meta.v);
       var parts = new Map();
-      for (var i = 0; i < got[1].length; i++) parts.set(got[1][i].name, bytes(got[1][i].data));
+      for (var i = 0; i < list.length; i++) parts.set(list[i].name, bytes(list[i].data));
       return { meta: meta, parts: parts };
     });
   }
 
   function deleteDraft(key) {
-    return openDb().then(function (db) {
-      var tx = db.transaction([DRAFTS, PARTS], "readwrite");
+    return runTx([DRAFTS, PARTS], "readwrite", function (tx) {
       tx.objectStore(DRAFTS).delete(key);
       tx.objectStore(PARTS).delete(partsRange(key));
-      return done(tx);
     });
   }
 
   /** Keeps a copy that can't be opened for 30 more days (from now) under
-   * another key, so a new session doesn't overwrite it. */
+   * another key, so a new session doesn't overwrite it. (Read, then written
+   * in a second transaction: each commits at once; one editor per draft, so
+   * nothing writes it in between.) */
   function setDraftAside(key) {
-    return openDb().then(function (db) {
-      var tx = db.transaction([DRAFTS, PARTS], "readwrite");
-      var drafts = tx.objectStore(DRAFTS), parts = tx.objectStore(PARTS);
-      var aside = key + "~unreadable-" + Date.now();
-      return req(drafts.get(key)).then(function (meta) {
-        if (!meta) return done(tx);
-        return req(parts.getAll(partsRange(key))).then(function (list) {
-          for (var i = 0; i < list.length; i++) {
-            parts.put({ key: aside, name: list[i].name, data: list[i].data });
-          }
-          var m = Object.assign({}, meta, { key: aside, set_aside: true, aside_at: Date.now() });
-          drafts.put(m);
-          drafts.delete(key);
-          parts.delete(partsRange(key));
-          return done(tx);
-        });
+    var aside = key + "~unreadable-" + Date.now();
+    return runTx([DRAFTS, PARTS], "readonly", function (tx) {
+      return { meta: tx.objectStore(DRAFTS).get(key), parts: tx.objectStore(PARTS).getAll(partsRange(key)) };
+    }).then(function (got) {
+      var meta = got.meta.result;
+      if (!meta) return aside;
+      var list = got.parts.result;
+      return runTx([DRAFTS, PARTS], "readwrite", function (tx) {
+        var drafts = tx.objectStore(DRAFTS), parts = tx.objectStore(PARTS);
+        for (var i = 0; i < list.length; i++) parts.put({ key: aside, name: list[i].name, data: list[i].data });
+        drafts.put(Object.assign({}, meta, { key: aside, set_aside: true, aside_at: Date.now() }));
+        drafts.delete(key);
+        parts.delete(partsRange(key));
       }).then(function () { return aside; });
     });
   }
 
-  /** Deletes copies not saved (or set aside) for MAX_AGE_MS. */
-  function expireDrafts(now) {
+  /** Deletes copies not saved (or set aside) for MAX_AGE_MS, but never
+   * `keep` (the draft this page has open). (The records read in one
+   * transaction and the old ones deleted in another, not with a cursor,
+   * whose requests come from callbacks.) */
+  function expireDrafts(now, keep) {
     now = now || Date.now();
-    return openDb().then(function (db) {
-      var tx = db.transaction([DRAFTS, PARTS], "readwrite");
-      var drafts = tx.objectStore(DRAFTS), parts = tx.objectStore(PARTS);
-      var count = 0;
-      var c = drafts.openCursor();
-      c.onsuccess = function () {
-        var cur = c.result;
-        if (!cur) return;
-        var m = cur.value;
+    return runTx([DRAFTS], "readonly", function (tx) {
+      return tx.objectStore(DRAFTS).getAll();
+    }).then(function (all) {
+      var old = (all.result || []).filter(function (m) {
         var at = Math.max(typeof m.saved === "number" ? m.saved : 0, typeof m.aside_at === "number" ? m.aside_at : 0);
-        if (!(at > 0 && now - at < MAX_AGE_MS)) {
-          parts.delete(partsRange(m.key));
-          cur.delete();
-          count++;
+        return m.key !== keep && !(at > 0 && now - at < MAX_AGE_MS);
+      });
+      if (!old.length) return 0;
+      return runTx([DRAFTS, PARTS], "readwrite", function (tx) {
+        for (var i = 0; i < old.length; i++) {
+          tx.objectStore(PARTS).delete(partsRange(old[i].key));
+          tx.objectStore(DRAFTS).delete(old[i].key);
         }
-        cur.continue();
-      };
-      return done(tx).then(function () { return count; });
+      }).then(function () { return old.length; });
     });
   }
 
@@ -310,7 +447,6 @@
     this.saving = null;
     this.again = false;
     this.timer = 0;
-    this.lastChange = 0;
     this.reported = "";
     this.deleting = null;
     /** sealed chunks of the recording: [{name, count}], and the events they
@@ -321,11 +457,33 @@
     this.head = null;
     this.saves = 0;
     this.lastStats = null;
+    /** a save is due, waiting for the pen to lift */
+    this.due = false;
+    this.dueCheck = false;
     var self = this;
+    // When to save: the copy has to be current before the page is left, not
+    // when it is. A save is due SAVE_DELAY_MS after the first change since
+    // the last one, and later changes don't put it off, so drawing without a
+    // pause still saves (it waits for the pen to lift). Leaving is a bonus: a
+    // page hidden (the app switcher, another tab; iOS delivers it before it
+    // suspends the page) saves at once, up to the stroke under way; but a
+    // page going into the back/forward cache (a swipe back in Safari or the
+    // iOS app: pagehide, persisted, and the visibilitychange after it) starts
+    // nothing, since WebKit freezes it right away and the write would never
+    // run (it would only hold the store). What it held is saved when it is
+    // shown again.
     document.addEventListener("visibilitychange", function () {
-      if (document.visibilityState === "hidden") self.saveNow();
+      if (document.visibilityState === "hidden" && !isPageAway()) self.saveNow();
     });
-    addEventListener("pagehide", function () { self.saveNow(); });
+    addEventListener("pagehide", function (e) {
+      if (!e.persisted) self.saveNow();
+    });
+    onPageBack.push(function () {
+      if (self.dirty && !self.deleted && !self.disabled) {
+        clearTimeout(self.timer);
+        self.timer = setTimeout(function () { self.onTimer(); }, 0);
+      }
+    });
   }
 
   Saver.prototype.state = function () {
@@ -347,35 +505,47 @@
 
   Saver.prototype.changed = function () {
     if (this.deleted || this.disabled) return;
-    this.dirty = true;
-    this.lastChange = performance.now();
     var self = this;
-    if (!this.timer) this.timer = setTimeout(function () { self.onTimer(); }, SAVE_DELAY_MS);
+    this.dirty = true;
+    if (this.due) {
+      // a save is due, waiting for the pen to lift: this change may be its
+      // lifting (checked once it is recorded)
+      if (!this.dueCheck) {
+        this.dueCheck = true;
+        setTimeout(function () {
+          self.dueCheck = false;
+          if (self.due && !Tegaki.isPainting) {
+            clearTimeout(self.timer);
+            self.onTimer();
+          }
+        }, 0);
+      }
+    } else if (!this.timer) {
+      // (a save already due stands: later changes never put it off)
+      this.timer = setTimeout(function () { self.onTimer(); }, SAVE_DELAY_MS);
+    }
     this.report();
   };
 
   Saver.prototype.onTimer = function () {
     var self = this;
     this.timer = 0;
-    var since = performance.now() - this.lastChange;
-    if (since < SAVE_DELAY_MS - 20) {
-      this.timer = setTimeout(function () { self.onTimer(); }, SAVE_DELAY_MS - since);
+    if (!this.dirty || this.deleted || this.disabled || isPageAway()) {
+      // (in the back/forward cache: saved when shown again)
+      this.due = false;
       return;
     }
     if (Tegaki.isPainting) {
-      // mid-stroke: wait for it to end (a hidden page saves anyway)
-      this.timer = setTimeout(function () { self.onTimer(); }, 400);
+      // mid-stroke: saved as soon as the pen lifts (changed), or found here a
+      // moment later (a hidden page saves anyway)
+      this.due = true;
+      this.timer = setTimeout(function () { self.onTimer(); }, 250);
       return;
     }
-    var run = function () {
-      if (Tegaki.isPainting) {
-        self.timer = setTimeout(function () { self.onTimer(); }, 400);
-        return;
-      }
-      self.save();
-    };
-    if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 1000 });
-    else setTimeout(run, 0);
+    this.due = false;
+    // (right away, not at an idle moment: the next stroke may start any
+    // moment, and the page may be left)
+    this.save();
   };
 
   /** Saves at once if anything changed, up to the stroke under way. */
@@ -417,15 +587,20 @@
       return this.saving;
     }
     this.dirty = false;
+    this.due = false;
     this.saving = Promise.resolve()
       .then(function () { return self.write(); })
       .then(function () {
         self.failed = false;
       }, function (err) {
-        // QuotaExceededError (the device is full) or a broken IndexedDB.
-        // Nothing it wrote counts, so the next try writes it all again.
-        console.warn("[autosave] couldn't save the drawing on this device", err);
         self.dirty = true;
+        // (the page went into the back/forward cache: not a failure; saved
+        // again when it is shown)
+        if (err && err.name === "PageAwayError") return;
+        // QuotaExceededError (the device is full) or a broken IndexedDB, still
+        // broken through DB_RETRY_MS. Nothing it wrote counts, so the next try
+        // writes it all again.
+        console.warn("[autosave] couldn't save the drawing on this device", err);
         var first = !self.failed;
         self.failed = true;
         if (first) {
@@ -516,9 +691,10 @@
     };
     var keep = new Set(chunks.map(function (c) { return c.name; }));
     var syncMs = performance.now() - start;
-    return openDb().then(function (db) {
-      if (self.deleted || self.disabled) return;
-      var tx = db.transaction([DRAFTS, PARTS], "readwrite");
+    if (self.deleted || self.disabled) return Promise.resolve();
+    // (chained: the stale pieces are found by a request, and deleted from its
+    // callback; committed after that)
+    return runTx([DRAFTS, PARTS], "readwrite", function (tx, finish) {
       var parts = tx.objectStore(PARTS);
       for (var i = 0; i < puts.length; i++) parts.put({ key: self.key, name: puts[i].name, data: puts[i].data });
       tx.objectStore(DRAFTS).put(meta);
@@ -527,30 +703,30 @@
       keysReq.onsuccess = function () {
         var ks = keysReq.result || [];
         for (var j = 0; j < ks.length; j++) if (!keep.has(ks[j][1])) parts.delete(ks[j]);
+        finish();
       };
-      return done(tx).then(function () {
-        self.chunks = chunks;
-        self.sealed = sealed;
-        self.sealedLast = sealedLast;
-        self.head = head;
-        self.everSaved = true;
-        var wrote = tail.length;
-        for (var k = 0; k < puts.length; k++) wrote += puts[k].data.length;
-        self.saves++;
-        self.lastStats = {
-          at: saved,
-          ms: Math.round((performance.now() - start) * 10) / 10,
-          sync_ms: Math.round(syncMs * 10) / 10,
-          bytes: wrote,
-          events: meta.events,
-          chunks: chunks.length,
-          open_stroke: meta.openStroke,
-        };
-        console.log("[autosave] saved on this device: " + meta.events + " events" + (meta.openStroke ? " (mid-stroke)" : "") + ", wrote " + wrote + " bytes in " + self.lastStats.ms + " ms");
-        try {
-          if (self.onsaved) self.onsaved({ at: saved });
-        } catch (e) {}
-      });
+    }, true).then(function () {
+      self.chunks = chunks;
+      self.sealed = sealed;
+      self.sealedLast = sealedLast;
+      self.head = head;
+      self.everSaved = true;
+      var wrote = tail.length;
+      for (var k = 0; k < puts.length; k++) wrote += puts[k].data.length;
+      self.saves++;
+      self.lastStats = {
+        at: saved,
+        ms: Math.round((performance.now() - start) * 10) / 10,
+        sync_ms: Math.round(syncMs * 10) / 10,
+        bytes: wrote,
+        events: meta.events,
+        chunks: chunks.length,
+        open_stroke: meta.openStroke,
+      };
+      console.log("[autosave] saved on this device: " + meta.events + " events" + (meta.openStroke ? " (mid-stroke)" : "") + ", wrote " + wrote + " bytes in " + self.lastStats.ms + " ms");
+      try {
+        if (self.onsaved) self.onsaved({ at: saved });
+      } catch (e) {}
     });
   };
 
@@ -561,9 +737,8 @@
     var name = this.session + ":picture";
     return pngOf(Tegaki.flatten()).then(function (png) {
       if (!png) throw new Error("The picture could not be encoded");
-      return openDb().then(function (db) {
-        if (self.deleted || self.disabled) return;
-        var tx = db.transaction([DRAFTS, PARTS], "readwrite");
+      if (self.deleted || self.disabled) return;
+      return runTx([DRAFTS, PARTS], "readwrite", function (tx, finish) {
         var parts = tx.objectStore(PARTS);
         parts.put({ key: self.key, name: name, data: png });
         tx.objectStore(DRAFTS).put({
@@ -581,14 +756,14 @@
         keysReq.onsuccess = function () {
           var ks = keysReq.result || [];
           for (var j = 0; j < ks.length; j++) if (ks[j][1] !== name) parts.delete(ks[j]);
+          finish();
         };
-        return done(tx).then(function () {
-          self.everSaved = true;
-          self.saves++;
-          try {
-            if (self.onsaved) self.onsaved({ at: saved });
-          } catch (e) {}
-        });
+      }, true).then(function () {
+        self.everSaved = true;
+        self.saves++;
+        try {
+          if (self.onsaved) self.onsaved({ at: saved });
+        } catch (e) {}
       });
     });
   };
@@ -738,6 +913,7 @@
     DB_NAME: DB_NAME,
     CHUNK_EVENTS: CHUNK_EVENTS,
     SAVE_DELAY_MS: SAVE_DELAY_MS,
+    DB_RETRY_MS: DB_RETRY_MS,
     RETRY_MS: RETRY_MS,
     MAX_AGE_MS: MAX_AGE_MS,
     validKey: validKey,

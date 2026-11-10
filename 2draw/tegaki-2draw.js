@@ -241,7 +241,7 @@
     title.className = "tegaki-2draw-taken-title";
     title.textContent = "This drawing is open in another tab.";
     var words = document.createElement("p");
-    words.textContent = "Your drawing is saved on this device.";
+    words.textContent = "Drawing saved on this device.";
     var button = document.createElement("button");
     button.type = "button";
     button.textContent = "Continue here";
@@ -561,13 +561,13 @@
   function startEditor() {
     var p = params();
     if (!p.draft) return startPosted(p);
+    var expire = function () {
+      TegakiDraft.expireDrafts(Date.now(), p.draft).catch(function () {});
+    };
     // One editor per draft (another tab hands over first), then its copy.
     TegakiDraft.takeEditLock(p.draft, onTaken)
       .catch(function (e) {
         console.error("[autosave] edit lock", e);
-      })
-      .then(function () {
-        return TegakiDraft.expireDrafts().catch(function () {});
       })
       .then(function () {
         // With cloud drafts on, a copy on 2draw that this device lacks (drawn
@@ -581,7 +581,10 @@
         });
       })
       .then(function () {
-        return TegakiDraft.loadDraft(p.draft);
+        var read = TegakiDraft.loadDraft(p.draft);
+        // old copies (of other drawings) go after this one is read, not before
+        read.then(expire, expire);
+        return read;
       })
       .then(function (draft) {
         if (!draft) return startPosted(p);
@@ -670,7 +673,7 @@
           console.error(err);
           if (p.load) return startFromPicture(p);
           notice("");
-          window.alert("Your drawing's recording could not be loaded (" + (err && err.message ? err.message : err) + ").");
+          window.alert("This drawing's recording couldn't be loaded (" + (err && err.message ? err.message : err) + ").");
           openEditor(p, null, true);
         });
     } else if (p.load) {
@@ -695,7 +698,7 @@
       },
       function (err) {
         notice("");
-        window.alert("Your drawing could not be loaded (" + err.message + ").");
+        window.alert("This drawing couldn't be loaded (" + err.message + ").");
         openEditor(p, null, true);
       },
     );
