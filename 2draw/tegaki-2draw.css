@@ -143,3 +143,36 @@ body {
     min-height: 28px;
   }
 }
+
+/* Another tab has this drawing (tegaki-draft.js takeEditLock). */
+#tegaki-2draw-taken {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.tegaki-2draw-taken-card {
+  background: #fff;
+  color: #222;
+  border-radius: 6px;
+  padding: 16px 20px;
+  max-width: 300px;
+  font: 14px sans-serif;
+  text-align: center;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+.tegaki-2draw-taken-card p {
+  margin: 0 0 12px;
+}
+.tegaki-2draw-taken-card .tegaki-2draw-taken-title {
+  font-weight: bold;
+  margin-bottom: 6px;
+}
+.tegaki-2draw-taken-card button {
+  min-width: 120px;
+  padding: 6px 12px;
+  font: inherit;
+}

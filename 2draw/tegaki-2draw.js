@@ -7,8 +7,25 @@
 //     new recording continues it, so the animation stays complete.
 //   - load: the drawing's picture, used when there is no recording (it goes
 //     onto the first layer, and this session is not recorded).
+//   - draft: the 2draw draft key. A copy of the drawing in progress is kept
+//     on this device under it (tegaki-draft.js) and restored on the next
+//     load, ahead of anim and load.
 //   Submit hands the PNG and the recording to window.parent.tegakiHost.submit
 //   (lib/applet.ts tegakiEmbedHtml), which uploads them and leaves the page.
+//   extra.uploaded(), which the host calls once the server has the drawing,
+//   deletes the device copy.
+//
+//   With a draft key it also sets, on the (same-origin) parent, as JSPaint.exe
+//   and Lascaux Pocket do (2draw.net client/draw-bar.ts, applet-boot.ts):
+//     tegakiHost.draftSaved({at} | {failed: true})  the bar's "Saved on this
+//                            device" / "Not saved" line
+//     drawPersists: boolean  the drawing is kept on this device: Close asks
+//                            nothing
+//     drawUnchanged: boolean nothing drawn: leaving loses nothing
+//     drawGuard(on)          the parent's leave warning: on while leaving
+//                            would lose something
+//     drawFlush(): Promise   saves now (Close waits for it, 2 s at most)
+//     drawOnDiscard[]        the draft's Discard deletes the copy too
 //
 // Replay engine: window.tegakiReplay (see the bottom of this file).
 (function () {
@@ -23,6 +40,7 @@
       height: Math.max(1, Math.min(8192, parseInt(q.get("h"), 10) || 400)),
       anim: q.get("anim"),
       load: q.get("load"),
+      draft: window.TegakiDraft && TegakiDraft.validKey(q.get("draft")) ? q.get("draft") : null,
     };
   }
 
@@ -65,7 +83,8 @@
     });
   }
 
-  function openEditor(p, continueReplay, record) {
+  /** restored: the device copy this session continues ({meta}), or null. */
+  function openEditor(p, continueReplay, record, restored) {
     // Inside 2draw the draw page warns before leaving unsaved work; a second
     // warning from this frame would only stack another prompt on it.
     if (host()) Tegaki.onTabClose = function () {};
@@ -78,10 +97,156 @@
       onCancel: function () {},
     });
     customizeMenu();
-    if (!record) TegakiUI.setRecordingStatus(false);
+    if (!record) {
+      // (its indicator only exists while recording: without the guard a
+      // revision from a picture never got its picture)
+      try {
+        TegakiUI.setRecordingStatus(false);
+      } catch (e) {}
+    }
     fitZoom();
     installPanelToggle();
     installTouchGestures();
+    if (p.draft) startSaver(p, record ? "record" : "picture", restored || null);
+  }
+
+  // --- the copy on this device (tegaki-draft.js) ---------------------------
+
+  /** @type {any} TegakiDraft.Saver, with a draft key */
+  var saver = null;
+  /** another tab took the drawing over */
+  var yielded = false;
+  /** something was drawn (or changed) since the editor opened */
+  var touched = false;
+
+  /** The same-origin 2draw page, or null. */
+  function parentPage() {
+    try {
+      if (window.parent !== window && window.parent.location.origin === location.origin) return window.parent;
+    } catch (e) {}
+    return null;
+  }
+
+  function announce(info) {
+    var h = host();
+    try {
+      if (h && typeof h.draftSaved === "function") h.draftSaved(info);
+    } catch (e) {}
+  }
+
+  var shownLeave = "";
+  /** The parent's leave question: asked only while leaving would lose
+   * something. */
+  function syncLeave() {
+    var page = parentPage();
+    if (!page || !saver) return;
+    var s = saver.state();
+    var persists = s.saved || s.yielded;
+    var unchanged = !saver.everSaved && !touched;
+    var guard = !s.yielded && (s.pending || (!persists && !unchanged));
+    var k = persists + "|" + unchanged + "|" + guard;
+    if (k === shownLeave) return;
+    shownLeave = k;
+    try {
+      page.drawPersists = persists;
+      page.drawUnchanged = unchanged;
+      if (typeof page.drawGuard === "function") page.drawGuard(guard);
+    } catch (e) {
+      console.error("[autosave] couldn't tell the page", e);
+    }
+  }
+
+  function startSaver(p, mode, restored) {
+    if (yielded) return;
+    try {
+      var first = true;
+      saver = new TegakiDraft.Saver({
+        key: p.draft,
+        width: Tegaki.baseWidth,
+        height: Tegaki.baseHeight,
+        mode: mode,
+        restored: restored,
+        onsaved: function (info) {
+          announce({ at: info.at });
+          if (first) {
+            first = false;
+            TegakiDraft.requestPersistentStorage();
+          }
+        },
+        onfailed: function () { announce({ failed: true }); },
+        onstate: function () { syncLeave(); },
+      });
+      window.tegakiSaver = saver;
+      // Every recorded change (strokes, undo, colours, layers) goes through
+      // Tegaki.recordEvent, recording or not.
+      var record = Tegaki.recordEvent;
+      Tegaki.recordEvent = function () {
+        var r = record.apply(this, arguments);
+        touched = true;
+        if (saver) saver.changed();
+        syncLeave();
+        return r;
+      };
+      var page = parentPage();
+      if (page) {
+        page.drawFlush = function () { return saver ? saver.flush() : Promise.resolve(); };
+        page.drawOnDiscard = (page.drawOnDiscard || []).concat([function () { return saver ? saver.delete() : Promise.resolve(); }]);
+      }
+      if (restored) announce({ at: restored.meta.saved || Date.now() });
+      syncLeave();
+    } catch (e) {
+      console.error("[autosave] couldn't start", e);
+      saver = null;
+    }
+  }
+
+  /** Another tab took this drawing over: cover the editor; Continue here
+   * takes it back. */
+  function onTaken() {
+    yielded = true;
+    showTakenCover();
+    return (saver ? saver.yieldEdit() : Promise.resolve()).then(syncLeave);
+  }
+
+  function showTakenCover() {
+    if (document.getElementById("tegaki-2draw-taken")) return;
+    var cover = document.createElement("div");
+    cover.id = "tegaki-2draw-taken";
+    cover.setAttribute("role", "dialog");
+    cover.setAttribute("aria-modal", "true");
+    var card = document.createElement("div");
+    card.className = "tegaki-2draw-taken-card";
+    var title = document.createElement("p");
+    title.className = "tegaki-2draw-taken-title";
+    title.textContent = "This drawing is open in another tab.";
+    var words = document.createElement("p");
+    words.textContent = "Your drawing is saved on this device.";
+    var button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Continue here";
+    button.addEventListener("click", function () {
+      button.disabled = true;
+      location.reload();
+    });
+    card.appendChild(title);
+    card.appendChild(words);
+    card.appendChild(button);
+    cover.appendChild(card);
+    ["pointerdown", "pointermove", "pointerup", "touchstart", "wheel", "keydown", "contextmenu"].forEach(function (type) {
+      cover.addEventListener(type, function (e) {
+        if (e.target === button) return;
+        e.stopPropagation();
+        if (type !== "pointermove" && type !== "touchstart" && type !== "wheel") e.preventDefault();
+      });
+    });
+    document.body.appendChild(cover);
+    button.focus();
+  }
+
+  function reportError(message, err) {
+    try {
+      if (typeof window.reportClientError === "function") window.reportClientError(message, err);
+    } catch (e) {}
   }
 
   /** No New / Open (they change the canvas size or drop the recording) and
@@ -350,7 +515,17 @@
       var done;
       if (!png) done = Promise.reject(new Error("The picture could not be encoded."));
       else if (!h) done = Promise.reject(new Error("This page is not inside 2draw's draw page."));
-      else done = Promise.resolve(h.submit(png, { animation: replay }));
+      else {
+        // The host calls uploaded() once the server has the drawing, before
+        // it leaves the page: then the device copy goes.
+        var uploaded = function () {
+          return saver ? saver.delete().catch(function (e) { console.warn("[autosave] couldn't delete the device copy", e); }) : Promise.resolve();
+        };
+        done = Promise.resolve(h.submit(png, { animation: replay, uploaded: uploaded })).then(function (r) {
+          uploaded();
+          return r;
+        });
+      }
       done.then(function () {
         notice("Sent! Opening your drawing…");
       }, function (err) {
@@ -364,6 +539,88 @@
 
   function startEditor() {
     var p = params();
+    if (!p.draft) return startPosted(p);
+    // One editor per draft (another tab hands over first), then its copy.
+    TegakiDraft.takeEditLock(p.draft, onTaken)
+      .catch(function (e) {
+        console.error("[autosave] edit lock", e);
+      })
+      .then(function () {
+        return TegakiDraft.expireDrafts().catch(function () {});
+      })
+      .then(function () {
+        return TegakiDraft.loadDraft(p.draft);
+      })
+      .then(function (draft) {
+        if (!draft) return startPosted(p);
+        return restoreDraft(p, draft);
+      }, function (err) {
+        console.error("[autosave] couldn't read the copy on this device", err);
+        return startPosted(p);
+      });
+  }
+
+  /** Opens the copy on this device. One that can't be opened (or is for
+   * another canvas size) is set aside, kept for 30 days, and the editor
+   * starts from the posted drawing instead. */
+  function restoreDraft(p, draft) {
+    var meta = draft.meta;
+    function setAside(why, err) {
+      console.error("[autosave] " + why, err);
+      reportError("tegaki: device copy set aside: " + why, err);
+      if (Tegaki.bg) {
+        try {
+          Tegaki.destroy();
+        } catch (e) {}
+      }
+      return TegakiDraft.setDraftAside(p.draft).catch(function () {}).then(function () {
+        startPosted(p);
+        setTimeout(function () {
+          try {
+            TegakiUI.printMsg("The copy of this drawing on this device couldn't be opened. It's kept, and this starts over.", 10000);
+          } catch (e) {}
+        }, 0);
+      });
+    }
+    if (meta.width !== p.width || meta.height !== p.height) {
+      return setAside("it is " + meta.width + "x" + meta.height + ", the drawing " + p.width + "x" + p.height);
+    }
+    if (meta.mode === "picture") {
+      var png = draft.parts.get(meta.picture);
+      if (!png) return setAside("its picture is missing");
+      var url = URL.createObjectURL(new Blob([png], { type: "image/png" }));
+      return loadImage(url).then(function (img) {
+        URL.revokeObjectURL(url);
+        openEditor(p, null, false, draft);
+        var layer = Tegaki.activeLayer;
+        layer.ctx.drawImage(img, 0, 0);
+        TegakiLayers.syncLayerImageData(layer);
+        TegakiUI.updateLayerPreview(layer);
+      }, function (err) {
+        URL.revokeObjectURL(url);
+        return setAside("its picture can't be read", err);
+      });
+    }
+    var buf;
+    try {
+      buf = TegakiDraft.toTgkr(draft);
+      openEditor(p, buf, true, draft);
+    } catch (err) {
+      return setAside("it can't be replayed", err);
+    }
+    // Replayed as it was saved? A difference is reported, not acted on: the
+    // replay is what the recording shows, so it is what gets posted.
+    if (meta.hash != null) {
+      var now = TegakiDraft.hashLayers();
+      if (now !== meta.hash) {
+        console.warn("[autosave] the restored drawing differs from the saved one", meta.hash, now);
+        reportError("tegaki: device copy replay drifted (" + meta.events + " events)");
+      }
+    }
+  }
+
+  /** Starts from the posted drawing: its recording, else its picture. */
+  function startPosted(p) {
     if (p.anim) {
       notice("Loading your drawing…");
       fetchBytes(p.anim)

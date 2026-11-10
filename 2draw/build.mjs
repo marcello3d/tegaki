@@ -35,7 +35,7 @@ rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
 writeFileSync(join(OUT, "tegaki.js"), src);
 copyFileSync(join(ROOT, "css/tegaki.css"), join(OUT, "tegaki.css"));
-for (const f of ["tegaki-2draw.js", "tegaki-2draw.css", "player.js", "README.md"])
+for (const f of ["tegaki-2draw.js", "tegaki-draft.js", "tegaki-2draw.css", "player.js", "README.md"])
   copyFileSync(join(ROOT, "2draw", f), join(OUT, f));
 // The pages name their scripts with ?v=<build>, so a new build is never mixed
 // with a cached old one.
