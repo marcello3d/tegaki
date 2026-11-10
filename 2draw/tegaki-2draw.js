@@ -524,7 +524,7 @@
     // Tegaki.onDoneClick has hidden the editor and stopped the recording.
     if (sending) return;
     sending = true;
-    notice("Sending your drawing to 2draw…");
+    notice("Uploading drawing…");
     var replay = null;
     try {
       replay = Tegaki.replayRecorder ? Tegaki.replayRecorder.toBlob() : null;
@@ -547,9 +547,8 @@
           return r;
         });
       }
-      done.then(function () {
-        notice("Sent! Opening your drawing…");
-      }, function (err) {
+      // (accepted: the draw page's upload screen shows its check and leaves)
+      done.then(null, function (err) {
         sending = false;
         notice("");
         window.alert((err && err.message) || String(err));
@@ -657,7 +656,7 @@
   /** Starts from the posted drawing: its recording, else its picture. */
   function startPosted(p) {
     if (p.anim) {
-      notice("Loading your drawing…");
+      notice("Loading drawing…");
       fetchBytes(p.anim)
         .then(function (buf) {
           notice("");
@@ -685,7 +684,7 @@
 
   /** Revising a drawing without a recording: its picture is the first layer. */
   function startFromPicture(p) {
-    notice("Loading your drawing…");
+    notice("Loading drawing…");
     return loadImage(p.load).then(
       function (img) {
         notice("");
