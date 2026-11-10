@@ -156,6 +156,25 @@
     }
   }
 
+  /** A small picture (256 px on the long side): WebP, or JPEG where the
+   * browser can't make WebP. */
+  function thumbnail(canvas) {
+    var scale = Math.min(1, 256 / Math.max(canvas.width, canvas.height, 1));
+    var c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(canvas.width * scale));
+    c.height = Math.max(1, Math.round(canvas.height * scale));
+    var g = c.getContext("2d");
+    if (!g) return Promise.resolve(null);
+    g.fillStyle = "#fff";
+    g.fillRect(0, 0, c.width, c.height);
+    g.imageSmoothingQuality = "high";
+    g.drawImage(canvas, 0, 0, c.width, c.height);
+    function as(type, q) {
+      return new Promise(function (res) { c.toBlob(res, type, q); });
+    }
+    return as("image/webp", 0.8).then(function (b) { return b && b.type === "image/webp" ? b : as("image/jpeg", 0.85); });
+  }
+
   function startSaver(p, mode, restored) {
     if (yielded) return;
     try {
@@ -191,6 +210,8 @@
       if (page) {
         page.drawFlush = function () { return saver ? saver.flush() : Promise.resolve(); };
         page.drawOnDiscard = (page.drawOnDiscard || []).concat([function () { return saver ? saver.delete() : Promise.resolve(); }]);
+        // the picture for the lists of unsaved drawings (draw-bar.ts cloudThumb)
+        page.drawThumb = function () { return thumbnail(Tegaki.flatten()); };
       }
       if (restored) announce({ at: restored.meta.saved || Date.now() });
       syncLeave();
@@ -547,6 +568,17 @@
       })
       .then(function () {
         return TegakiDraft.expireDrafts().catch(function () {});
+      })
+      .then(function () {
+        // With cloud drafts on, a copy on 2draw that this device lacks (drawn
+        // on another device) is put here first (2draw.net
+        // worker/src/client/draw-bar.ts drawCloudReady), so it is read as
+        // this device's own.
+        var page = parentPage();
+        if (!page || typeof page.drawCloudReady !== "function") return null;
+        return Promise.resolve(page.drawCloudReady()).catch(function (e) {
+          console.warn("[autosave] couldn't check the copy on 2draw", e);
+        });
       })
       .then(function () {
         return TegakiDraft.loadDraft(p.draft);
