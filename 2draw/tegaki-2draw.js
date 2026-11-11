@@ -726,7 +726,11 @@
       if (!applied || meta.hash == null) return;
       // Replayed as it was saved? A difference is reported, not acted on: the
       // replay is what the recording shows, so it is what gets posted.
-      return TegakiDraft.hashLayersSliced().then(function (now) {
+      // (in slices; null if anything is drawn meanwhile)
+      var rec = Tegaki.replayRecorder;
+      var count = rec ? rec.events.length : -1;
+      var same = function () { return Tegaki.replayRecorder === rec && (rec ? rec.events.length : -1) === count; };
+      return TegakiDraft.hashLayersSliced(false, performance.now(), same).then(function (now) {
         if (now != null && now !== meta.hash) {
           console.warn("[autosave] the restored drawing differs from the saved one", meta.hash, now);
           reportError("tegaki: device copy replay drifted (" + meta.events + " events)");
