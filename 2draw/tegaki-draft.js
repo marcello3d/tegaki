@@ -580,9 +580,22 @@
     if (this.deleted || this.disabled) return;
     var self = this;
     this.dirty = true;
-    if (this.due) {
+    if (this.due && drawPen()) {
       // a save is due, waiting for the pen: it goes once the pen rests
       // (gatedSave)
+    } else if (this.due) {
+      // a save is due, waiting for the pen to lift: this change may be its
+      // lifting (checked once it is recorded)
+      if (!this.dueCheck) {
+        this.dueCheck = true;
+        setTimeout(function () {
+          self.dueCheck = false;
+          if (self.due && !Tegaki.isPainting) {
+            clearTimeout(self.timer);
+            self.onTimer();
+          }
+        }, 0);
+      }
     } else if (!this.timer) {
       // (a save already due stands: later changes never put it off)
       this.timer = setTimeout(function () { self.onTimer(); }, SAVE_DELAY_MS);
