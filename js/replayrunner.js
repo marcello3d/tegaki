@@ -283,7 +283,7 @@ var TegakiReplayRunner = {
 
         // now and then a frame, so the picture builds up on screen (not in
         // a hidden page, which draws none)
-        if (!document.hidden && performance.now() - lastPaint > 50) {
+        if (!document.hidden && performance.now() - lastPaint > 100) {
           self.afterFrame(function() {
             lastPaint = performance.now();
             slice();
@@ -333,7 +333,7 @@ var TegakiReplayRunner = {
     this.channel.port2.postMessage(0);
   },
 
-  // fn once the next frame is drawn (or after 100 ms, if none is).
+  // fn once the next frame is drawn (or after 50 ms, if none is).
   afterFrame: function(fn) {
     var self = this, done = false;
 
@@ -345,6 +345,6 @@ var TegakiReplayRunner = {
     }
 
     requestAnimationFrame(go);
-    setTimeout(go, 100);
+    setTimeout(go, 50);
   }
 };
