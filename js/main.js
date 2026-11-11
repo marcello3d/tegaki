@@ -332,6 +332,12 @@ var Tegaki = {
     
     for (klass of Tegaki.toolList) {
       tool = new klass();
+      // [2draw] A recording keeps each tool's step as a 32-bit float, and a
+      // replay draws with that; drawing with the 64-bit default (0.1, 0.05,
+      // 0.01) spaced some strokes' dabs differently, so a drawing replayed
+      // (reopened from its copy, or the animation) was not quite what was
+      // drawn ("device copy replay drifted").
+      tool.step = Math.fround(tool.step);
       Tegaki.tools[tool.name] = tool;
     }
   },
