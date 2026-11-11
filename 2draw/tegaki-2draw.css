@@ -43,7 +43,8 @@ body {
 #tegaki-2draw-replaying {
   position: fixed;
   inset: 0;
-  z-index: 9999;
+  /* over #tegaki (9999) */
+  z-index: 10001;
   cursor: progress;
   touch-action: none;
 }
