@@ -11,7 +11,13 @@ Built with `node 2draw/build.mjs` in the fork (writes `dist-2draw/`).
   `tegakiEmbedHtml` as an iframe. Submit calls
   `window.parent.tegakiHost.submit(pngBlob, { animation: tgkrBlob })`.
   `anim` is the previous version's `.tgkr`: it is replayed into the editor and
-  the new recording continues it.
+  the new recording continues it. Reopening replays (the device copy too) in
+  slices of about 12 ms (`js/replayrunner.js`), so the page never freezes;
+  the picture builds up behind a cover that takes no input, with a progress
+  box after 0.4 s. A replay skips the undo copies nothing can read and the
+  layer previews until the end; the pixels are the same as dispatching
+  every event. Check: 2draw.net `worker/scripts/perf/replay-tegaki.mjs`
+  (`bench`, and `compare --old <build>` for byte-identical pixels).
 - `&draft=<key>`: the 2draw draft key. `tegaki-draft.js` keeps a copy of the
   drawing in progress on this device (IndexedDB `2draw-tegaki-drafts`) under
   it and restores it on the next load, ahead of `anim` and `load`; the

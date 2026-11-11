@@ -1,19 +1,56 @@
 class TegakiBrush extends TegakiTool {
   constructor() {
     super();
+    
+    // [2draw] readImageData/writeImageData use the stroke buffers, unclipped
+    // (Tegaki.markBuffers)
+    this.unclippedBuffers = false;
+    
+    // [2draw] the kernel's alpha × flow (kernelFlow)
+    this.kfKernel = null;
+    this.kfFlow = 0;
+    this.kf = null;
   }
   
   generateShape(size) {}
   
+  // [2draw] (kernel alpha / 255) × flow for each kernel pixel, as brushFn
+  // computes it (the same doubles, so the same pixels), once per shape and
+  // flow instead of for every pixel of every stamp.
+  kernelFlow(kernel, brushFlow, n) {
+    var i, kf, div;
+    
+    if (this.kfKernel === kernel && this.kfFlow === brushFlow) {
+      return this.kf;
+    }
+    
+    if (!this.kf || this.kf.length < n) {
+      this.kf = new Float64Array(Math.max(n, 64 * 64));
+    }
+    
+    kf = this.kf;
+    div = TegakiBrush.DIV255;
+    
+    for (i = 0; i < n; ++i) {
+      kf[i] = div[kernel[i * 4 + 3]] * brushFlow;
+    }
+    
+    this.kfKernel = kernel;
+    this.kfFlow = brushFlow;
+    
+    return kf;
+  }
+  
   brushFn(x, y, offsetX, offsetY) {
-    var aData, gData, bData, aWidth, canvasWidth, canvasHeight,
+    var aData, gData, bData, canvasWidth, canvasHeight,
       kernel, xx, yy, ix, iy,
-      pa, ka, a, sa,
+      pa, a, sa,
       kr, kg, kb,
       r, g, b,
       pr, pg, pb,
       px, ba,
-      brushSize, brushAlpha, brushFlow, preserveAlpha;
+      brushSize, brushAlpha, brushFlow, preserveAlpha,
+      div, kf, ki;
     
     preserveAlpha = this.preserveAlphaEnabled;
     
@@ -30,11 +67,14 @@ class TegakiBrush extends TegakiTool {
     canvasWidth = Tegaki.baseWidth;
     canvasHeight = Tegaki.baseHeight;
     
-    aWidth = canvasWidth;
-    
     kr = this.rgb[0];
     kg = this.rgb[1];
     kb = this.rgb[2];
+    
+    // [2draw] the same arithmetic as before, with x / 255 looked up and the
+    // kernel's alpha × flow worked out once (kernelFlow)
+    div = TegakiBrush.DIV255;
+    kf = this.kernelFlow(kernel, brushFlow, brushSize * brushSize);
     
     for (yy = 0; yy < brushSize; ++yy) {
       iy = y + yy + offsetY;
@@ -50,16 +90,16 @@ class TegakiBrush extends TegakiTool {
           continue;
         }
         
-        ka = kernel[(yy * brushSize + xx) * 4 + 3] / 255;
+        ki = yy * brushSize + xx;
         
-        if (ka <= 0.0) {
+        if (kernel[ki * 4 + 3] === 0) {
           continue;
         }
         
         px = (iy * canvasWidth + ix) * 4;
         
-        sa = bData[px + 3] / 255;
-        sa = sa + ka * brushFlow * (brushAlpha - sa);
+        sa = div[bData[px + 3]];
+        sa = sa + kf[ki] * (brushAlpha - sa);
         
         ba = Math.ceil(sa * 255);
         
@@ -77,7 +117,7 @@ class TegakiBrush extends TegakiTool {
           pr = gData[px];
           pg = gData[px + 1];
           pb = gData[px + 2];
-          pa = gData[px + 3] / 255;
+          pa = div[gData[px + 3]];
           
           a = pa + sa - pa * sa;
           
@@ -171,6 +211,8 @@ class TegakiBrush extends TegakiTool {
     sampleX = posX - this.center;
     sampleY = posY - this.center;
     
+    Tegaki.markBuffers(sampleX, sampleY, this.brushSize, this.brushSize, this.unclippedBuffers);
+    
     this.readImageData(sampleX, sampleY, this.brushSize, this.brushSize);
     
     this.brushFn(0, 0, sampleX, sampleY);
@@ -217,6 +259,10 @@ class TegakiBrush extends TegakiTool {
     w = dx + brushSize;
     h = dy + brushSize;
     
+    if (this.unclippedBuffers) {
+      Tegaki.markBuffers(sampleX, sampleY, w, h, true);
+    }
+    
     this.readImageData(sampleX, sampleY, w, h);
     
     err = (dx > dy ? dx : (dy !== 0 ? -dy : 0)) / 2;
@@ -246,11 +292,13 @@ class TegakiBrush extends TegakiTool {
           }
           
           if (this.updateDynamics(t)) {
+            Tegaki.markBuffers(fromX - this.center, fromY - this.center, this.brushSize, this.brushSize, false);
             this.brushFn(fromX - this.center - sampleX, fromY - this.center - sampleY, sampleX, sampleY);
             tainted = true;
           }
         }
         else {
+          Tegaki.markBuffers(fromX - this.center, fromY - this.center, this.brushSize, this.brushSize, false);
           this.brushFn(fromX - this.center - sampleX, fromY - this.center - sampleY, sampleX, sampleY);
           tainted = true;
         }
@@ -331,3 +379,6 @@ class TegakiBrush extends TegakiTool {
     }
   }
 }
+
+// [2draw] x / 255 for every byte value (the same doubles as dividing)
+TegakiBrush.DIV255 = new Float64Array(256).map(function(v, i) { return i / 255; });

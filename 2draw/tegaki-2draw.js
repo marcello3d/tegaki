@@ -83,8 +83,31 @@
     });
   }
 
-  /** restored: the device copy this session continues ({meta}), or null. */
+  /** restored: the device copy this session continues ({meta}), or null.
+   * Returns a promise: the recording (continueReplay, the bytes of a .tgkr)
+   * replayed into it, true (rejects if it can't be read or replayed; false
+   * if the editor was closed first). Without one the editor is open on
+   * return. */
   function openEditor(p, continueReplay, record, restored) {
+    if (!continueReplay) {
+      openNow(p, null, record, restored);
+      return Promise.resolve(true);
+    }
+    // Read in slices, then replayed in slices (tegaki.js TegakiReplayRunner),
+    // so the page never freezes; nothing can be drawn meanwhile.
+    showReplaying();
+    return TegakiReplayRunner.load(continueReplay).then(function (viewer) {
+      openNow(p, viewer, record, restored);
+      var replayed = Tegaki.replayDone || Promise.resolve(true);
+      replayed.then(hideReplaying, hideReplaying);
+      return replayed;
+    }, function (err) {
+      hideReplaying();
+      throw err;
+    });
+  }
+
+  function openNow(p, viewer, record, restored) {
     // Inside 2draw the draw page warns before leaving unsaved work; a second
     // warning from this frame would only stack another prompt on it.
     if (host()) Tegaki.onTabClose = function () {};
@@ -92,10 +115,13 @@
       width: p.width,
       height: p.height,
       saveReplay: record,
-      continueReplay: continueReplay || undefined,
+      continueReplay: viewer || undefined,
+      replayAsync: true,
+      onReplayProgress: replayProgress,
       onDone: onDone,
       onCancel: function () {},
     });
+    if (Tegaki.replaying && Tegaki.bg) Tegaki.bg.inert = true;
     customizeMenu();
     if (!record) {
       // (its indicator only exists while recording: without the guard a
@@ -108,6 +134,54 @@
     installPanelToggle();
     installTouchGestures();
     if (p.draft) startSaver(p, record ? "record" : "picture", restored || null);
+  }
+
+  // --- while a recording is replayed into the editor ----------------------
+  // Nothing can be drawn or changed until it's done (tegaki.js ignores the
+  // pen and keys meanwhile; this covers the rest of the UI), and after a
+  // moment a small box says how far it has got. The picture builds up
+  // behind it.
+
+  var replayBoxTimer = 0;
+
+  function showReplaying() {
+    var cover = document.getElementById("tegaki-2draw-replaying");
+    if (!cover) {
+      cover = document.createElement("div");
+      cover.id = "tegaki-2draw-replaying";
+      cover.innerHTML = '<div class="tegaki-2draw-replaying-box" role="status" hidden>Opening the drawing… <span class="tegaki-2draw-replaying-pct"></span><div class="tegaki-2draw-replaying-bar"><div></div></div></div>';
+      ["pointerdown", "pointerup", "click", "dblclick", "contextmenu", "touchstart", "keydown"].forEach(function (type) {
+        cover.addEventListener(type, function (e) {
+          e.stopPropagation();
+          if (type !== "touchstart") e.preventDefault();
+        });
+      });
+      document.body.appendChild(cover);
+    }
+    cover.hidden = false;
+    if (Tegaki.bg) Tegaki.bg.inert = true;
+    clearTimeout(replayBoxTimer);
+    replayBoxTimer = setTimeout(function () {
+      var box = cover.querySelector(".tegaki-2draw-replaying-box");
+      if (box) box.hidden = false;
+    }, 400);
+  }
+
+  function replayProgress(fraction) {
+    var cover = document.getElementById("tegaki-2draw-replaying");
+    if (!cover) return;
+    var pct = Math.floor(fraction * 100);
+    var bar = cover.querySelector(".tegaki-2draw-replaying-bar > div");
+    var label = cover.querySelector(".tegaki-2draw-replaying-pct");
+    if (bar) bar.style.width = pct + "%";
+    if (label) label.textContent = pct + "%";
+  }
+
+  function hideReplaying() {
+    clearTimeout(replayBoxTimer);
+    var cover = document.getElementById("tegaki-2draw-replaying");
+    if (cover) cover.remove();
+    if (Tegaki.bg) Tegaki.bg.inert = false;
   }
 
   // --- the copy on this device (tegaki-draft.js) ---------------------------
@@ -201,6 +275,8 @@
       var record = Tegaki.recordEvent;
       Tegaki.recordEvent = function () {
         var r = record.apply(this, arguments);
+        // (replaying the drawing changes nothing: it is what is saved)
+        if (Tegaki.replaying) return r;
         touched = true;
         if (saver) saver.changed();
         syncLeave();
@@ -211,7 +287,10 @@
         page.drawFlush = function () { return saver ? saver.flush() : Promise.resolve(); };
         page.drawOnDiscard = (page.drawOnDiscard || []).concat([function () { return saver ? saver.delete() : Promise.resolve(); }]);
         // the picture for the lists of unsaved drawings (draw-bar.ts cloudThumb)
-        page.drawThumb = function () { return thumbnail(Tegaki.flatten()); };
+        page.drawThumb = function () {
+          // (of the whole drawing, once it is replayed)
+          return Promise.resolve(Tegaki.replayDone).catch(function () {}).then(function () { return thumbnail(Tegaki.flatten()); });
+        };
       }
       if (restored) announce({ at: restored.meta.saved || Date.now() });
       syncLeave();
@@ -635,22 +714,27 @@
         return setAside("its picture can't be read", err);
       });
     }
-    var buf;
+    var buf, replayed;
     try {
-      buf = TegakiDraft.toTgkr(draft);
-      openEditor(p, buf, true, draft);
+      // (uncompressed: it is read straight back)
+      buf = TegakiDraft.toTgkr(draft, true);
+      replayed = openEditor(p, buf, true, draft);
     } catch (err) {
       return setAside("it can't be replayed", err);
     }
-    // Replayed as it was saved? A difference is reported, not acted on: the
-    // replay is what the recording shows, so it is what gets posted.
-    if (meta.hash != null) {
-      var now = TegakiDraft.hashLayers();
-      if (now !== meta.hash) {
-        console.warn("[autosave] the restored drawing differs from the saved one", meta.hash, now);
-        reportError("tegaki: device copy replay drifted (" + meta.events + " events)");
-      }
-    }
+    return replayed.then(function (applied) {
+      if (!applied || meta.hash == null) return;
+      // Replayed as it was saved? A difference is reported, not acted on: the
+      // replay is what the recording shows, so it is what gets posted.
+      return TegakiDraft.hashLayersSliced().then(function (now) {
+        if (now != null && now !== meta.hash) {
+          console.warn("[autosave] the restored drawing differs from the saved one", meta.hash, now);
+          reportError("tegaki: device copy replay drifted (" + meta.events + " events)");
+        }
+      });
+    }, function (err) {
+      return setAside("it can't be replayed", err);
+    });
   }
 
   /** Starts from the posted drawing: its recording, else its picture. */
@@ -660,12 +744,16 @@
       fetchBytes(p.anim)
         .then(function (buf) {
           notice("");
-          try {
-            openEditor(p, buf, true);
-          } catch (err) {
+          var failed = function (err) {
             console.error("tegaki: could not continue the recording", err);
             if (Tegaki.bg) Tegaki.destroy();
+            hideReplaying();
             throw err;
+          };
+          try {
+            return openEditor(p, buf, true).catch(failed);
+          } catch (err) {
+            failed(err);
           }
         })
         .catch(function (err) {
@@ -727,11 +815,29 @@
 
   ReplayEngine.prototype.load = function (buffer) {
     Tegaki.open({ replayMode: true });
+    Tegaki.replayViewer.loadFromBuffer(buffer);
+    return this._start();
+  };
+
+  /** load, reading the recording in slices (a promise of the same). */
+  ReplayEngine.prototype.load_async = function (buffer) {
+    var self = this;
+    var viewer = new TegakiReplayViewer();
+    return viewer.loadFromBufferSliced(buffer, TegakiReplayRunner.SLICE_MS).then(function () {
+      Tegaki.open({ replayMode: true });
+      Tegaki.replayViewer = viewer;
+      return self._start();
+    });
+  };
+
+  ReplayEngine.prototype._start = function () {
     var viewer = Tegaki.replayViewer;
-    viewer.loadFromBuffer(buffer);
     Tegaki.initFromReplay();
     Tegaki.init();
     Tegaki.setTool(Tegaki.defaultTool);
+    TegakiReplayRunner.eventCodes();
+    // the hidden engine shows no layer list
+    TegakiReplayRunner.deferPreviews();
     var events = viewer.events;
     var times = new Float64Array(events.length);
     var t = 0;
@@ -756,10 +862,11 @@
     var start = performance.now();
     var n = 0;
     while (this._index < events.length && times[this._index] <= ms) {
-      events[this._index].dispatch();
+      // (no undo copies for strokes nothing will undo, no layer previews)
+      TegakiReplayRunner.dispatch(events, this._index, false);
       this._index++;
       n++;
-      if ((n & 31) === 0 && performance.now() - start > budget) break;
+      if ((n & 7) === 0 && performance.now() - start > budget) break;
     }
     if (n) this.version++;
     this.done = this._index >= events.length;

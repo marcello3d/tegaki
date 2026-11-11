@@ -37,6 +37,56 @@ body {
   display: none;
 }
 
+/* While the drawing is replayed into the editor (tegaki-2draw.js
+   showReplaying): nothing can be clicked, and after a moment a small box
+   says how far it has got. */
+#tegaki-2draw-replaying {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  cursor: progress;
+  touch-action: none;
+}
+
+#tegaki-2draw-replaying[hidden],
+.tegaki-2draw-replaying-box[hidden] {
+  display: none;
+}
+
+.tegaki-2draw-replaying-box {
+  position: absolute;
+  left: 50%;
+  top: 40%;
+  transform: translate(-50%, -50%);
+  min-width: 200px;
+  padding: 12px 18px 14px;
+  background: #fff;
+  color: #222;
+  font: 15px/1.4 arial, sans-serif;
+  border-radius: 6px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+}
+
+.tegaki-2draw-replaying-pct {
+  font-variant-numeric: tabular-nums;
+  color: #666;
+}
+
+.tegaki-2draw-replaying-bar {
+  margin-top: 8px;
+  height: 4px;
+  background: #e3e8ed;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.tegaki-2draw-replaying-bar > div {
+  width: 0;
+  height: 100%;
+  background: #3d6e9e;
+  transition: width 0.15s linear;
+}
+
 .tegaki-2draw-panel-btn {
   display: none !important;
 }

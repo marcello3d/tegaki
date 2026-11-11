@@ -6,6 +6,10 @@ var TegakiHistory = {
   
   pendingAction: null,
   
+  // [2draw] Set while a replay dispatches a stroke whose undo copies can
+  // never be read (TegakiReplayRunner.copyNeeded): it makes none.
+  skipCopy: false,
+  
   clear: function() {
     this.undoStack = [];
     this.redoStack = [];
@@ -92,6 +96,8 @@ var TegakiHistoryActions = {
   Draw: function(layerId) {
     this.coalesce = false;
     
+    this.noCopy = TegakiHistory.skipCopy;
+    
     this.imageDataBefore = null;
     this.imageDataAfter = null;
     this.layerId = layerId;
@@ -158,6 +164,10 @@ var TegakiHistoryActions = {
 // ---
 
 TegakiHistoryActions.Draw.prototype.addCanvasState = function(imageData, type) {
+  if (this.noCopy) {
+    return;
+  }
+  
   if (type) {
     this.imageDataAfter = $T.copyImageData(imageData);
   }
@@ -168,6 +178,10 @@ TegakiHistoryActions.Draw.prototype.addCanvasState = function(imageData, type) {
 
 TegakiHistoryActions.Draw.prototype.exec = function(type) {
   var layer = TegakiLayers.getLayerById(this.layerId);
+  
+  if (this.noCopy) {
+    throw new Error('replay: a stroke without undo copies was undone');
+  }
   
   if (type) {
     layer.ctx.putImageData(this.imageDataAfter, 0, 0);
