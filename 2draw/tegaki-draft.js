@@ -332,8 +332,9 @@
     return new Uint8Array(w.buf);
   }
 
-  /** A copy (loadDraft) as the bytes of a .tgkr, for continueReplay. */
-  function toTgkr(draft) {
+  /** A copy (loadDraft) as the bytes of a .tgkr, for continueReplay. raw:
+   * uncompressed (the format's flag; only for reading straight back). */
+  function toTgkr(draft, raw) {
     var meta = draft.meta;
     var pieces = [bytes(meta.head)];
     var count = 0;
@@ -362,13 +363,13 @@
       pos += pieces[i].length;
     }
     data.set(endBytes, pos);
-    var comp = UZIP.deflateRaw(data, { level: 1 });
+    var comp = raw ? data : UZIP.deflateRaw(data, { level: 1 });
     var out = new Uint8Array(12 + comp.length);
     var dv = new DataView(out.buffer);
     out[0] = 0x54;
     out[1] = 0x47;
     out[2] = 0x4b;
-    out[3] = 1;
+    out[3] = raw ? 0 : 1;
     dv.setUint32(4, data.length);
     out[8] = meta.tegakiVersion[0];
     out[9] = meta.tegakiVersion[1];
@@ -398,6 +399,50 @@
       for (var j = 0; j < u.length; j += 4) h = Math.imul(h ^ u[j], 0x01000193);
     }
     return h >>> 0;
+  }
+
+  /** hashLayers in slices of about 8 ms (a promise). Null if the drawing
+   * changed meanwhile. */
+  function hashLayersSliced() {
+    return new Promise(function (resolve) {
+      if (!Tegaki.layers || Tegaki.isPainting) return resolve(null);
+      var layers = Tegaki.layers.slice();
+      var rec = Tegaki.replayRecorder;
+      var events = rec ? rec.events.length : -1;
+      var h = 0x811c9dc5 | 0;
+      var li = 0, j = 0, u = null;
+      function mix(v) {
+        h = Math.imul(h ^ v, 0x01000193);
+      }
+      function step() {
+        if (Tegaki.isPainting || Tegaki.replayRecorder !== rec || (rec ? rec.events.length : -1) !== events) return resolve(null);
+        var start = performance.now();
+        while (li < layers.length) {
+          if (!u) {
+            var layer = layers[li];
+            mix(layer.visible ? 1 : 2);
+            mix(Math.round((layer.alpha == null ? 1 : layer.alpha) * 1000));
+            var d = layer.imageData && layer.imageData.data;
+            if (!d) {
+              li++;
+              continue;
+            }
+            u = new Uint32Array(d.buffer, d.byteOffset, d.byteLength >> 2);
+            j = 0;
+          }
+          // (as hashLayers: every fourth pixel)
+          var end = Math.min(u.length, j + 262144);
+          for (; j < end; j += 4) h = Math.imul(h ^ u[j], 0x01000193);
+          if (j >= u.length) {
+            u = null;
+            li++;
+          }
+          if (performance.now() - start > 8 && li < layers.length) return setTimeout(step, 0);
+        }
+        resolve(h >>> 0);
+      }
+      step();
+    });
   }
 
   function sessionId() {
@@ -923,6 +968,7 @@
     expireDrafts: expireDrafts,
     toTgkr: toTgkr,
     hashLayers: hashLayers,
+    hashLayersSliced: hashLayersSliced,
     Saver: Saver,
     takeEditLock: takeEditLock,
     requestPersistentStorage: requestPersistentStorage,

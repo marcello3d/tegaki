@@ -23,6 +23,11 @@ var TegakiKeybinds = {
   resolve: function(e) {
     var fn, mods, keys, el;
     
+    // [2draw] nothing while a drawing is being replayed into the editor
+    if (Tegaki.replaying) {
+      return;
+    }
+    
     el = e.target;
     
     if (el.nodeName == 'INPUT' && (el.type === 'text' || el.type === 'number')) {

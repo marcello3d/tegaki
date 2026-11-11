@@ -75,6 +75,14 @@ var Tegaki = {
   
   saveReplay: false,
   
+  // [2draw] true while a recording is replayed into the editor
+  // (opts.replayAsync): drawing, keys and the UI wait for it. replayDone:
+  // the replay's promise (resolves once it's applied and recording
+  // carries on; rejects if it can't be replayed), or null.
+  replaying: false,
+  replayDone: null,
+  replayRun: 0,
+  
   open: function(opts = {}) {
     var self = Tegaki;
     
@@ -108,13 +116,20 @@ var Tegaki = {
     self.createTools();
     
     // [2draw] Continue an earlier recording (opts.continueReplay, the bytes
-    // of a .tgkr): start from its initial state, replay all of it below, and
-    // keep recording onto the end of it.
+    // of a .tgkr, or a TegakiReplayViewer that has loaded them): start from
+    // its initial state, replay all of it below, and keep recording onto the
+    // end of it.
     var continued = null;
     
     if (!self.replayMode && opts.continueReplay) {
-      continued = new TegakiReplayViewer();
-      continued.loadFromBuffer(opts.continueReplay);
+      if (opts.continueReplay instanceof TegakiReplayViewer) {
+        continued = opts.continueReplay;
+      }
+      else {
+        continued = new TegakiReplayViewer();
+        continued.loadFromBuffer(opts.continueReplay);
+      }
+      
       self.replayViewer = continued;
       self.initFromReplay();
       self.replayViewer = null;
@@ -132,18 +147,52 @@ var Tegaki = {
       
       self.setTool(self.defaultTool);
       
-      if (continued) {
-        self.replayEvents(continued.events);
-      }
+      let startRecording = function() {
+        if (self.saveReplay) {
+          self.replayRecorder = new TegakiReplayRecorder();
+          
+          if (continued) {
+            self.replayRecorder.continueFrom(continued);
+          }
+          
+          self.replayRecorder.start();
+        }
+      };
       
-      if (self.saveReplay) {
-        self.replayRecorder = new TegakiReplayRecorder();
+      self.replayDone = null;
+      
+      if (continued && opts.replayAsync) {
+        // [2draw] in slices (TegakiReplayRunner.run), recording once done
+        let run = ++self.replayRun;
         
+        self.replaying = true;
+        
+        self.replayDone = TegakiReplayRunner.run(continued.events, {
+          onProgress: opts.onReplayProgress,
+          isCancelled: function() { return self.replayRun !== run; },
+        }).then(function(applied) {
+          if (self.replayRun !== run) {
+            return false;
+          }
+          
+          self.replaying = false;
+          startRecording();
+          
+          return applied;
+        }, function(err) {
+          if (self.replayRun === run) {
+            self.replaying = false;
+          }
+          
+          throw err;
+        });
+      }
+      else {
         if (continued) {
-          self.replayRecorder.continueFrom(continued);
+          self.replayEvents(continued.events);
         }
         
-        self.replayRecorder.start();
+        startRecording();
       }
     }
     else {
@@ -231,14 +280,12 @@ var Tegaki = {
   
   // [2draw] Applies recorded events at once (nothing is recorded meanwhile).
   replayEvents: function(events) {
-    var e, recorder = Tegaki.replayRecorder;
+    var recorder = Tegaki.replayRecorder;
     
     Tegaki.replayRecorder = null;
     
     try {
-      for (e of events) {
-        e.dispatch();
-      }
+      TegakiReplayRunner.runSync(events, true);
     }
     finally {
       Tegaki.replayRecorder = recorder;
@@ -344,11 +391,77 @@ var Tegaki = {
     Tegaki.blendBuffer = new ImageData(Tegaki.baseWidth, Tegaki.baseHeight);
     Tegaki.ghostBuffer32 = new Uint32Array(Tegaki.ghostBuffer.data.buffer);
     Tegaki.blendBuffer32 = new Uint32Array(Tegaki.blendBuffer.data.buffer);
+    Tegaki.resetBufferMarks();
+  },
+  
+  // [2draw] What the tools wrote into the stroke buffers since they were
+  // last cleared (TegakiBrush marks it): a rectangle, and whether a write
+  // ran off its side of the canvas into the rows next to it (the blur tool
+  // copies whole rectangles in and out unclipped). Clearing that clears
+  // all of it: the rest is still zero. Clearing the whole buffers after
+  // every stroke was most of a replay's time on a big canvas.
+  resetBufferMarks() {
+    Tegaki.bufMinX = Infinity;
+    Tegaki.bufMinY = Infinity;
+    Tegaki.bufMaxX = -Infinity;
+    Tegaki.bufMaxY = -Infinity;
+    Tegaki.bufWrapped = false;
+  },
+  
+  // Writes into the buffers at x, y, w × h. unclipped: not kept inside the
+  // canvas (an x outside it lands in another row).
+  markBuffers(x, y, w, h, unclipped) {
+    var x0 = Math.floor(x), y0 = Math.floor(y),
+      x1 = Math.ceil(x + w) - 1, y1 = Math.ceil(y + h) - 1;
+    
+    if (x0 < Tegaki.bufMinX) { Tegaki.bufMinX = x0; }
+    if (y0 < Tegaki.bufMinY) { Tegaki.bufMinY = y0; }
+    if (x1 > Tegaki.bufMaxX) { Tegaki.bufMaxX = x1; }
+    if (y1 > Tegaki.bufMaxY) { Tegaki.bufMaxY = y1; }
+    
+    if (unclipped && (x0 < 0 || x1 >= Tegaki.baseWidth)) {
+      Tegaki.bufWrapped = true;
+    }
   },
   
   clearBuffers() {
-    Tegaki.ghostBuffer32.fill(0);
-    Tegaki.blendBuffer32.fill(0);
+    var w, h, len, x0, x1, y0, y1, y, g, b;
+    
+    if (Tegaki.bufMaxY < Tegaki.bufMinY) {
+      return;
+    }
+    
+    w = Tegaki.baseWidth;
+    h = Tegaki.baseHeight;
+    g = Tegaki.ghostBuffer32;
+    b = Tegaki.blendBuffer32;
+    len = g.length;
+    
+    if (Tegaki.bufWrapped) {
+      // everything from the first written pixel to the last
+      x0 = Math.max(0, Tegaki.bufMinY * w + Tegaki.bufMinX);
+      x1 = Math.min(len, Tegaki.bufMaxY * w + Tegaki.bufMaxX + 1);
+      
+      if (x1 > x0) {
+        g.fill(0, x0, x1);
+        b.fill(0, x0, x1);
+      }
+    }
+    else {
+      x0 = Math.max(0, Tegaki.bufMinX);
+      x1 = Math.min(w, Tegaki.bufMaxX + 1);
+      y0 = Math.max(0, Tegaki.bufMinY);
+      y1 = Math.min(h - 1, Tegaki.bufMaxY);
+      
+      if (x1 > x0) {
+        for (y = y0; y <= y1; ++y) {
+          g.fill(0, y * w + x0, y * w + x1);
+          b.fill(0, y * w + x0, y * w + x1);
+        }
+      }
+    }
+    
+    Tegaki.resetBufferMarks();
   },
   
   destroyBuffers() {
@@ -465,6 +578,11 @@ var Tegaki = {
   },
   
   destroy: function() {
+    // [2draw] a replay under way stops
+    Tegaki.replayRun++;
+    Tegaki.replaying = false;
+    Tegaki.replayDone = null;
+    
     Tegaki.unBindGlobalEvents();
     
     TegakiKeybinds.clear();
@@ -1314,6 +1432,11 @@ var Tegaki = {
   onPointerMove: function(e) {
     var events, x, y, tool, ts, p;
     
+    // [2draw] no drawing onto a picture still being replayed
+    if (Tegaki.replaying) {
+      return;
+    }
+    
     if (Tegaki.cursor) {
       TegakiCursor.render(e.clientX, e.clientY);
     }
@@ -1373,6 +1496,10 @@ var Tegaki = {
   
   onPointerDown: function(e) {
     var x, y, tool, p;
+    
+    if (Tegaki.replaying) {
+      return;
+    }
     
     if (Tegaki.cursor) {
       TegakiCursor.render(e.clientX, e.clientY);
@@ -1439,6 +1566,10 @@ var Tegaki = {
   },
   
   onPointerUp: function(e) {
+    if (Tegaki.replaying) {
+      return;
+    }
+    
     Tegaki.activePointerId = e.pointerId;
     
     Tegaki.activePointerIsPen = false;

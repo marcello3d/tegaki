@@ -1,6 +1,9 @@
 var TegakiUI = {
   draggedNode: null,
   
+  // [2draw] layers whose previews a replay will draw (a Set), or null
+  deferredPreviews: null,
+  
   draggedLabelLastX: 0,
   draggedLabelFn: null,
   
@@ -1033,6 +1036,12 @@ var TegakiUI = {
   
   updateLayerPreview: function(layer) {
     var canvas, ctx;
+    
+    // [2draw] a replay draws them once it's done (TegakiReplayRunner)
+    if (TegakiUI.deferredPreviews) {
+      TegakiUI.deferredPreviews.add(layer);
+      return;
+    }
     
     canvas = $T.id('tegaki-layers-p-canvas-' + layer.id);
     

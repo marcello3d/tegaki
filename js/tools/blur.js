@@ -15,6 +15,8 @@ class TegakiBlur extends TegakiBrush {
     
     this.useAlphaDynamics = true;
     this.usePreserveAlpha = false;
+    
+    this.unclippedBuffers = true;
   }
   
   writeImageData(x, y, w, h) {

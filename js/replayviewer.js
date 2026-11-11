@@ -301,6 +301,12 @@ class TegakiReplayViewer {
   }
   
   decompressData(r) {
+    // [2draw] the flag is in the format; tegaki-draft.js toTgkr writes
+    // uncompressed bytes for the editor to read straight back
+    if (!this.compressed) {
+      return new Uint8Array(r.buf.slice(r.pos, r.pos + this.dataSize));
+    }
+    
     return UZIP.inflateRaw(
       new Uint8Array(r.buf, r.pos),
       new Uint8Array(this.dataSize)
@@ -339,17 +345,32 @@ class TegakiReplayViewer {
   }
   
   readEventStack(r) {
-    var i, len, type, klass, event, eventMap;
-    
-    eventMap = this.getEventIdMap();
-    
-    len = r.readUint32();
+    this.readEvents(r, this.readEventCount(r), Infinity);
+    this.checkEventStack();
+  }
+  
+  // [2draw] readEventStack in parts (loadFromBufferSliced)
+  readEventCount(r) {
+    var len = r.readUint32();
     
     if (len < 1 || len > this.maxEventCount) {
       throw 'invalid event count';
     }
     
-    for (i = 0; i < len; ++i) {
+    this.eventMap = this.getEventIdMap();
+    
+    return len;
+  }
+  
+  // Reads events until there are len, or until the time is up (ms after
+  // start). Returns whether all are read.
+  readEvents(r, len, ms) {
+    var i, type, klass, eventMap, start;
+    
+    eventMap = this.eventMap;
+    start = performance.now();
+    
+    for (i = this.events.length; i < len; ++i) {
       type = r.readUint8();
       
       klass = eventMap[type];
@@ -358,10 +379,18 @@ class TegakiReplayViewer {
         throw 'invalid event id';
       }
       
-      event = klass.unpack(r);
+      this.events.push(klass.unpack(r));
       
-      this.events.push(event);
+      if ((i & 1023) === 1023 && performance.now() - start >= ms) {
+        return i + 1 >= len;
+      }
     }
+    
+    return true;
+  }
+  
+  checkEventStack() {
+    var len = this.events.length;
     
     if (this.events[0].type !== TegakiEvents.TegakiEventPrelude[0]) {
       throw 'invalid prelude';
@@ -405,5 +434,57 @@ class TegakiReplayViewer {
     this.loaded = true;
     
     return true;
+  }
+  
+  // [2draw] loadFromBuffer, reading the events in slices of about ms so no
+  // task runs long. Resolves as loadFromBuffer returns; rejects as it throws.
+  loadFromBufferSliced(buffer, ms) {
+    var self = this;
+    
+    return new Promise(function(resolve, reject) {
+      var r, data, len;
+      
+      if (self.destroyed || self.loaded) {
+        resolve(false);
+        return;
+      }
+      
+      function more() {
+        try {
+          if (self.destroyed) {
+            resolve(false);
+            return;
+          }
+          
+          if (!self.readEvents(r, len, ms)) {
+            TegakiReplayRunner.post(more);
+            return;
+          }
+          
+          self.checkEventStack();
+          self.loaded = true;
+          resolve(true);
+        }
+        catch (err) {
+          reject(err);
+        }
+      }
+      
+      try {
+        r = new TegakiBinReader(buffer);
+        self.readHeader(r);
+        data = self.decompressData(r);
+        r = new TegakiBinReader(data.buffer);
+        self.readMeta(r);
+        self.readToolMap(r);
+        len = self.readEventCount(r);
+      }
+      catch (err) {
+        reject(err);
+        return;
+      }
+      
+      TegakiReplayRunner.post(more);
+    });
   }
 }

@@ -114,14 +114,20 @@
       // laid out (not display:none) but offscreen
       iframe.style.cssText = "position:fixed;left:-10000px;top:0;width:800px;height:600px;border:0;visibility:hidden;pointer-events:none;";
       iframe.onload = function () {
+        var failed = function (error) {
+          iframe.remove();
+          reject(error instanceof Error ? error : new Error("Could not read the animation (" + error + ")"));
+        };
         try {
           var engine = iframe.contentWindow.tegakiReplay;
           if (!engine) throw new Error("Replay engine failed to start");
-          var info = engine.load(self._buffer.slice(0));
-          resolve({ iframe: iframe, engine: engine, info: info });
+          var buffer = self._buffer.slice(0);
+          // (read in slices, so a long recording doesn't hold up the page)
+          Promise.resolve(engine.load_async ? engine.load_async(buffer) : engine.load(buffer)).then(function (info) {
+            resolve({ iframe: iframe, engine: engine, info: info });
+          }, failed);
         } catch (error) {
-          iframe.remove();
-          reject(error instanceof Error ? error : new Error("Could not read the animation (" + error + ")"));
+          failed(error);
         }
       };
       iframe.onerror = function () {
