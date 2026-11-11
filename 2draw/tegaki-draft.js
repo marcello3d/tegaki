@@ -614,9 +614,11 @@
    * next pen-up). */
   Saver.prototype.gatedSave = function () {
     var self = this;
-    if (this.due) return;
     this.due = true;
+    if (this.gateWaiting) return;
+    this.gateWaiting = true;
     whenPenRests(function () {
+      self.gateWaiting = false;
       if (!self.due) return;
       if (Tegaki.isPainting) {
         // (the pen of another frame, or none: Tegaki's own stroke under way)
