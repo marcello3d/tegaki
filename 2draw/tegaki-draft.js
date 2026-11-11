@@ -442,7 +442,7 @@
       var u = new Uint32Array(d.buffer, d.byteOffset, d.byteLength >> 2);
       // every fourth pixel: enough to tell
       for (var j = 0; j < u.length; ) {
-        var end = Math.min(u.length, j + 65536);
+        var end = Math.min(u.length, j + 32768);
         for (; j < end; j += 4) h = Math.imul(h ^ u[j], 0x01000193);
         if (j < u.length && !urgent && (performance.now() - t > budget || yielded())) {
           await nextSlice(urgent, since);
