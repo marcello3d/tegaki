@@ -45,6 +45,50 @@
   /** After a failed save, try again this long after (and at every change). */
   var RETRY_MS = 5000;
 
+  // Nothing interrupts drawing. On 2draw's draw page (the same-origin parent)
+  // window.drawPen (2draw.net client/draw-bar.ts) says when the pen rests: a
+  // save waits for a pause in the drawing, not just for the pen to lift (a
+  // save in the gap between two fast strokes held up the next one), and runs
+  // in slices of a few ms with a yield between them, each slice again only
+  // once the pen rests. Without that page (the editor alone), as before:
+  // at once, with plain yields.
+  function drawPen() {
+    try {
+      var p = window.parent !== window ? window.parent.drawPen : null;
+      return p && typeof p.idle === "function" ? p : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  /** fn() once the pen rests (now if it does). */
+  function whenPenRests(fn) {
+    var p = drawPen();
+    if (p) p.idle(fn);
+    else fn();
+  }
+  /** ms a slice of a save may take. */
+  function sliceMs() {
+    var p = drawPen();
+    return (p && p.sliceMs) || 4;
+  }
+  /** Before the next slice of a save started at `since` (not when `urgent`:
+   * the page is being hidden or left, and the save has to start now). */
+  function nextSlice(urgent, since) {
+    if (urgent || document.visibilityState === "hidden") return Promise.resolve();
+    var p = drawPen();
+    if (p && typeof p.slice === "function") return Promise.resolve(p.slice(since));
+    return new Promise(function (r) { setTimeout(r, 0); });
+  }
+  /** A slice should end early: input is waiting. */
+  function yielded() {
+    var p = drawPen();
+    try {
+      return !!(p && p.yielded && p.yielded());
+    } catch (e) {
+      return false;
+    }
+  }
+
   function validKey(key) {
     return typeof key === "string" && /^[0-9a-z_-]{4,64}$/.test(key);
   }
@@ -381,6 +425,35 @@
   /** A hash of what the layers hold (a sample of their pixels, order, visibility and
    * opacity), to tell whether a restore replayed the drawing as it was. Null
    * while a stroke is under way (the layer data is not current then). */
+  /** hashLayers in slices with a yield between them (nextSlice): the same
+   * hash, or null if the layers may have changed meanwhile (`same()` false:
+   * something was drawn or recorded since the save's snapshot). */
+  async function hashLayersSliced(urgent, since, same) {
+    if (!Tegaki.layers || Tegaki.isPainting) return null;
+    var layers = Tegaki.layers.slice();
+    var h = 0x811c9dc5 | 0;
+    var budget = sliceMs(), t = performance.now();
+    for (var i = 0; i < layers.length; i++) {
+      var layer = layers[i];
+      h = Math.imul(h ^ (layer.visible ? 1 : 2), 0x01000193);
+      h = Math.imul(h ^ Math.round((layer.alpha == null ? 1 : layer.alpha) * 1000), 0x01000193);
+      var d = layer.imageData && layer.imageData.data;
+      if (!d) continue;
+      var u = new Uint32Array(d.buffer, d.byteOffset, d.byteLength >> 2);
+      // every fourth pixel: enough to tell
+      for (var j = 0; j < u.length; ) {
+        var end = Math.min(u.length, j + 65536);
+        for (; j < end; j += 4) h = Math.imul(h ^ u[j], 0x01000193);
+        if (j < u.length && !urgent && (performance.now() - t > budget || yielded())) {
+          await nextSlice(urgent, since);
+          t = performance.now();
+          if (!same() || Tegaki.isPainting || Tegaki.layers.length !== layers.length || Tegaki.layers[i] !== layer || layer.imageData.data !== d) return null;
+        }
+      }
+    }
+    return h >>> 0;
+  }
+
   function hashLayers() {
     if (!Tegaki.layers || Tegaki.isPainting) return null;
     var h = 0x811c9dc5 | 0;
@@ -508,18 +581,8 @@
     var self = this;
     this.dirty = true;
     if (this.due) {
-      // a save is due, waiting for the pen to lift: this change may be its
-      // lifting (checked once it is recorded)
-      if (!this.dueCheck) {
-        this.dueCheck = true;
-        setTimeout(function () {
-          self.dueCheck = false;
-          if (self.due && !Tegaki.isPainting) {
-            clearTimeout(self.timer);
-            self.onTimer();
-          }
-        }, 0);
-      }
+      // a save is due, waiting for the pen: it goes once the pen rests
+      // (gatedSave)
     } else if (!this.timer) {
       // (a save already due stands: later changes never put it off)
       this.timer = setTimeout(function () { self.onTimer(); }, SAVE_DELAY_MS);
@@ -535,17 +598,37 @@
       this.due = false;
       return;
     }
+    if (drawPen()) return this.gatedSave();
     if (Tegaki.isPainting) {
-      // mid-stroke: saved as soon as the pen lifts (changed), or found here a
-      // moment later (a hidden page saves anyway)
+      // mid-stroke: found here a moment later (a hidden page saves anyway)
       this.due = true;
       this.timer = setTimeout(function () { self.onTimer(); }, 250);
       return;
     }
     this.due = false;
-    // (right away, not at an idle moment: the next stroke may start any
-    // moment, and the page may be left)
     this.save();
+  };
+
+  /** On 2draw's draw page: the save once the pen rests (drawPen.idle: in a
+   * pause between strokes; after a while of drawing without one, at the
+   * next pen-up). */
+  Saver.prototype.gatedSave = function () {
+    var self = this;
+    if (this.due) return;
+    this.due = true;
+    whenPenRests(function () {
+      if (!self.due) return;
+      if (Tegaki.isPainting) {
+        // (the pen of another frame, or none: Tegaki's own stroke under way)
+        self.due = false;
+        clearTimeout(self.timer);
+        self.timer = setTimeout(function () { self.onTimer(); }, 250);
+        return;
+      }
+      self.due = false;
+      if (!self.dirty || self.deleted || self.disabled || isPageAway()) return;
+      self.save();
+    });
   };
 
   /** Saves at once if anything changed, up to the stroke under way. */
@@ -553,7 +636,9 @@
     if (!this.dirty || this.deleted || this.disabled) return this.saving || Promise.resolve();
     clearTimeout(this.timer);
     this.timer = 0;
-    return this.save();
+    this.due = false;
+    // (urgent: the page is hidden or left, or Close: no slices)
+    return this.save(true);
   };
 
   /** Saves everything now and waits for it (Close: drawFlush). */
@@ -579,15 +664,17 @@
     });
   };
 
-  Saver.prototype.save = function () {
+  Saver.prototype.save = function (urgent) {
     var self = this;
     if (this.deleted || this.disabled) return Promise.resolve();
     if (this.saving) {
       this.again = true;
+      if (urgent) this.urgent = true;
       return this.saving;
     }
     this.dirty = false;
     this.due = false;
+    this.urgent = !!urgent;
     this.saving = Promise.resolve()
       .then(function () { return self.write(); })
       .then(function () {
@@ -617,10 +704,11 @@
         if (self.again) {
           self.again = false;
           if (self.dirty && !self.failed) {
-            if (document.visibilityState === "hidden") self.saveNow();
+            if (document.visibilityState === "hidden" || self.urgent) self.saveNow();
             else self.changed();
           }
         }
+        self.urgent = false;
         self.report();
       });
     this.report();
@@ -631,16 +719,40 @@
     return this.mode === "picture" ? this.writePicture() : this.writeRecording();
   };
 
-  /** The recording: new sealed chunks, and the rest as the tail. */
-  Saver.prototype.writeRecording = function () {
+  /** The recording: new sealed chunks, and the rest as the tail. Off the
+   * page being left (urgent), in slices (nextSlice): each new chunk, the
+   * tail and the layers' hash a slice or a few, never in the middle of a
+   * stroke. Begun again if the events before its end changed meanwhile (the
+   * touch gestures take a just-begun stroke back out). */
+  Saver.prototype.writeRecording = async function () {
+    for (var attempt = 0; ; attempt++) {
+      var r = await this.writeRecordingOnce(attempt >= 2 || this.urgent);
+      if (r !== "again") return r;
+    }
+  };
+
+  Saver.prototype.writeRecordingOnce = async function (urgent) {
     var self = this;
-    var start = performance.now();
+    var start = performance.now(), since = Date.now();
+    var mainMs = 0, sliceStart = start;
     var rec = Tegaki.replayRecorder;
-    if (!rec) return Promise.resolve();
+    if (!rec) return;
     var events = rec.events;
     var count = events.length;
     // stopped for a submit: its conclusion is not part of the drawing
     while (count > 0 && isConclusion(events[count - 1])) count--;
+    var lastEv = count ? events[count - 1] : null;
+    var n0 = events.length;
+    var same = function () {
+      return Tegaki.replayRecorder === rec && rec.events === events && events.length >= count && (!count || events[count - 1] === lastEv);
+    };
+    var slice = async function () {
+      var t = performance.now();
+      mainMs = Math.max(mainMs, t - sliceStart);
+      await nextSlice(urgent, since);
+      sliceStart = performance.now();
+      return same();
+    };
     var chunks = this.chunks.slice();
     var sealed = this.sealed;
     var sealedLast = this.sealedLast;
@@ -660,6 +772,7 @@
       chunks.push({ name: name, count: CHUNK_EVENTS });
       sealed += CHUNK_EVENTS;
       sealedLast = events[sealed - 1];
+      if (!urgent && !(await slice())) return "again";
     }
     // A stroke under way (the page is being hidden): the copy ends it here.
     var closing = [];
@@ -667,7 +780,17 @@
     if (Tegaki.isPainting && count) closing.push(new TegakiEventDrawCommit(lastTime));
     var tail = packEvents(events, sealed, count, closing);
     var head = this.head || packHead(rec);
-    var hash = closing.length ? null : hashLayers();
+    var hash = null;
+    if (!closing.length) {
+      if (urgent) hash = hashLayers();
+      else {
+        if (!(await slice())) return "again";
+        // (null when something was drawn meanwhile: this copy goes unchecked, the next has it)
+        hash = await hashLayersSliced(false, since, function () { return same() && events.length === n0; });
+        if (!same()) return "again";
+      }
+    }
+    var syncMs = Math.max(mainMs, performance.now() - sliceStart);
     var saved = Date.now();
     var meta = {
       key: this.key,
@@ -690,8 +813,7 @@
       openStroke: closing.length > 0,
     };
     var keep = new Set(chunks.map(function (c) { return c.name; }));
-    var syncMs = performance.now() - start;
-    if (self.deleted || self.disabled) return Promise.resolve();
+    if (self.deleted || self.disabled) return;
     // (chained: the stale pieces are found by a request, and deleted from its
     // callback; committed after that)
     return runTx([DRAFTS, PARTS], "readwrite", function (tx, finish) {
