@@ -358,6 +358,12 @@
   top: 0;
 }
 
+/* [2draw] while a drawing is replayed into them: a picture of them instead
+   (js/replayrunner.js preview) */
+#tegaki-layers.tegaki-replaying canvas.tegaki-layer {
+  visibility: hidden;
+}
+
 #tegaki-finish-btn {
   font-weight: bold;
 }

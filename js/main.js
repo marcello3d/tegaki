@@ -169,6 +169,7 @@ var Tegaki = {
         
         self.replayDone = TegakiReplayRunner.run(continued.events, {
           onProgress: opts.onReplayProgress,
+          preview: true,
           isCancelled: function() { return self.replayRun !== run; },
         }).then(function(applied) {
           if (self.replayRun !== run) {
@@ -430,6 +431,47 @@ var Tegaki = {
     }
   },
   
+  // [2draw] layer.ctx.putImageData(layer.imageData, 0, 0, x, y, w, h): the
+  // same pixels, put as an ImageData of just that rectangle. WebKit takes
+  // as long for a put as the whole ImageData it is given, whatever the
+  // rectangle (0.4 ms for 1100x900 on a fast Mac, at every pointer move and
+  // every replayed one).
+  putLayerRect(layer, x, y, w, h) {
+    var src = layer.imageData, sw = src.width, sh = src.height,
+      x0, y0, x1, y1, part, sd, dd, row, yy;
+
+    if ((x | 0) !== x || (y | 0) !== y || (w | 0) !== w || (h | 0) !== h || w < 0 || h < 0) {
+      layer.ctx.putImageData(src, 0, 0, x, y, w, h);
+      return;
+    }
+
+    // (the dirty rectangle clipped to the ImageData, as putImageData does)
+    x0 = Math.max(0, x);
+    y0 = Math.max(0, y);
+    x1 = Math.min(sw, x + w);
+    y1 = Math.min(sh, y + h);
+
+    if (x1 <= x0 || y1 <= y0) {
+      return;
+    }
+
+    if (x1 - x0 === sw && y1 - y0 === sh) {
+      layer.ctx.putImageData(src, 0, 0);
+      return;
+    }
+
+    part = new ImageData(x1 - x0, y1 - y0);
+    sd = src.data;
+    dd = part.data;
+    row = (x1 - x0) * 4;
+
+    for (yy = y0; yy < y1; ++yy) {
+      dd.set(sd.subarray((yy * sw + x0) * 4, (yy * sw + x1) * 4), (yy - y0) * row);
+    }
+
+    layer.ctx.putImageData(part, x0, y0);
+  },
+
   clearBuffers() {
     var w, h, len, x0, x1, y0, y1, y, g, b;
     

@@ -13,12 +13,20 @@
 //   follow (layer changes that may or may not push a step) keeps the copies.
 // - Layer previews (the layer list's thumbnails) are drawn once at the end,
 //   not after every stroke.
+// - (run, with opts.preview) The layers' canvases are hidden while they are
+//   replayed into, and a picture of them (Tegaki.flatten) is shown in their
+//   place, redrawn every PREVIEW_MS: a browser that shows a canvas between
+//   the dabs drawn on it (each slice is a task of its own) pays for it on
+//   every dab, WebKit most (several times slower than one task). The
+//   canvases get exactly the calls they always did.
 //
 // run() replays in slices of about SLICE_MS, yielding between them (and
 // letting a frame be drawn now and then, so the picture builds up), so no
 // task runs long; runSync() all at once.
 var TegakiReplayRunner = {
   SLICE_MS: 12,
+
+  PREVIEW_MS: 250,
 
   // How the history sees each event type: 1 a stroke starts, 2 it is
   // committed (pushed), 3 undo, 4 redo, 5 a step is pushed, 6 a step may be
@@ -226,9 +234,40 @@ var TegakiReplayRunner = {
     }
   },
 
+  // The picture in place of the layers (opts.preview): shown, redrawn, or
+  // (done) taken away.
+  preview: function(done) {
+    var cnt = Tegaki.layersCnt, canvas;
+
+    if (!cnt) {
+      return;
+    }
+
+    canvas = document.getElementById('tegaki-replay-preview');
+
+    if (done) {
+      cnt.classList.remove('tegaki-replaying');
+
+      if (canvas) {
+        canvas.remove();
+      }
+
+      return;
+    }
+
+    if (!canvas) {
+      canvas = $T.el('canvas');
+      canvas.id = 'tegaki-replay-preview';
+      cnt.appendChild(canvas);
+      cnt.classList.add('tegaki-replaying');
+    }
+
+    Tegaki.flatten(canvas.getContext('2d'));
+  },
+
   // events in slices; resolves once all are applied, rejects if one throws.
   // opts: onProgress(fraction) after each slice; isCancelled() to stop
-  // (resolves, applied or not, with false).
+  // (resolves, applied or not, with false); preview (see above).
   run: function(events, opts) {
     var self = this;
 
@@ -238,7 +277,7 @@ var TegakiReplayRunner = {
     this.deferPreviews();
 
     return new Promise(function(resolve, reject) {
-      var i = 0, n = events.length, lastPaint = performance.now();
+      var i = 0, n = events.length, lastPaint = performance.now(), nextPreview = 0;
 
       function slice() {
         var start = performance.now();
@@ -247,6 +286,16 @@ var TegakiReplayRunner = {
           // (the editor was closed: a new one may be replaying by now)
           resolve(false);
           return;
+        }
+
+        // (from the first slice; redrawn after 100 ms, then every PREVIEW_MS)
+        if (opts.preview && start >= nextPreview) {
+          try {
+            self.preview();
+          }
+          catch (e) {}
+
+          nextPreview = start + (i === 0 ? 100 : self.PREVIEW_MS);
         }
 
         try {
@@ -261,10 +310,19 @@ var TegakiReplayRunner = {
 
           if (i >= n) {
             self.flushPreviews();
+
+            if (opts.preview) {
+              self.preview(true);
+            }
           }
         }
         catch (err) {
           TegakiUI.deferredPreviews = null;
+
+          if (opts.preview) {
+            self.preview(true);
+          }
+
           reject(err);
           return;
         }

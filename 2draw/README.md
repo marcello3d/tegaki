@@ -14,9 +14,10 @@ Built with `node 2draw/build.mjs` in the fork (writes `dist-2draw/`).
   the new recording continues it. Reopening replays (the device copy too) in
   slices of about 12 ms (`js/replayrunner.js`), so the page never freezes;
   the picture builds up behind a cover that takes no input, with a progress
-  box after 0.4 s. A replay skips the undo copies nothing can read and the
-  layer previews until the end; the pixels are the same as dispatching
-  every event. Check: 2draw.net `worker/scripts/perf/replay-tegaki.mjs`
+  box after 0.4 s; the layers' canvases are hidden meanwhile, a picture
+  of them redrawn every 250 ms in their place. A replay skips the undo
+  copies nothing can read and the layer previews until the end; the pixels
+  are the same as dispatching every event. Check: 2draw.net `worker/scripts/perf/replay-tegaki.mjs`
   (`bench`, and `compare --old <build>` for byte-identical pixels).
 - `&draft=<key>`: the 2draw draft key. `tegaki-draft.js` keeps a copy of the
   drawing in progress on this device (IndexedDB `2draw-tegaki-drafts`) under
